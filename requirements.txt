@@ -1,4 +1,4 @@
-aiogram==3.7.0
-openai>=1.0.0
+aiogram==3.27.0
+openai==1.70.0
 aiohttp
-aioredis
+redis
