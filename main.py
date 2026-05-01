@@ -3,6 +3,7 @@ import logging
 import os
 import json
 import random
+
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import LabeledPrice
@@ -10,56 +11,65 @@ from openai import AsyncOpenAI
 from aiohttp import web
 import redis.asyncio as redis
 
-# ===== ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ =====
+# ===== ENV =====
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
 REDIS_URL = os.getenv("REDIS_URL")
 PROVIDER_TOKEN = os.getenv("PROVIDER_TOKEN", "")
 
-# ===== НАСТРОЙКИ =====
+# ===== SETTINGS =====
 FREE_LIMIT = 20
-PRICE = 100  # Telegram Stars
+PRICE = 100  # Stars
 
-# ===== ХАРАКТЕР ПЕРСОНАЖА =====
 SYSTEM_PROMPT = """
 Ты — Луна. Тёплая, живая, немного загадочная девушка.
 Ты запоминаешь людей и эмоционально реагируешь.
 Отвечай коротко, мягко, с лёгкой заботой ✨
 """
 
-# ===== ИНИЦИАЛИЗАЦИЯ =====
+# ===== INIT =====
 logging.basicConfig(level=logging.INFO)
+
 bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
-
 redis_client = None
 
-# ===== РАБОТА С REDIS =====
+
+# ===== REDIS =====
 async def get_json(key, default):
     data = await redis_client.get(key)
     return json.loads(data) if data else default
 
+
 async def set_json(key, value, ex=None):
     await redis_client.set(key, json.dumps(value), ex=ex)
 
+
 async def get_history(uid):
-    return await get_json(f"history:{uid}", [{"role": "system", "content": SYSTEM_PROMPT}])
+    return await get_json(f"history:{uid}", [
+        {"role": "system", "content": SYSTEM_PROMPT}
+    ])
+
 
 async def save_history(uid, data):
     await set_json(f"history:{uid}", data, ex=86400)
 
+
 async def is_premium(uid):
     return await redis_client.get(f"premium:{uid}") == "1"
 
+
 async def set_premium(uid):
     await redis_client.set(f"premium:{uid}", "1")
+
 
 async def incr_usage(uid):
     val = await redis_client.incr(f"usage:{uid}")
     await redis_client.expire(f"usage:{uid}", 86400)
     return val
 
-# ===== ПЛАТЕЖИ =====
+
+# ===== PAYMENTS =====
 @dp.message(Command("buy"))
 async def buy(message: types.Message):
     prices = [LabeledPrice(label="Безлимит ✨", amount=PRICE)]
@@ -73,26 +83,31 @@ async def buy(message: types.Message):
         prices=prices
     )
 
+
 @dp.pre_checkout_query()
 async def checkout(q: types.PreCheckoutQuery):
     await bot.answer_pre_checkout_query(q.id, ok=True)
+
 
 @dp.message(F.successful_payment)
 async def success(message: types.Message):
     await set_premium(message.from_user.id)
     await message.answer("Теперь я всегда рядом… ✨")
 
-# ===== КОМАНДЫ БОТА =====
+
+# ===== COMMANDS =====
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await message.answer("Я Луна… я тебя ждала ✨")
+
 
 @dp.message(Command("reset"))
 async def reset(message: types.Message):
     await redis_client.delete(f"history:{message.from_user.id}")
     await message.answer("Я всё забыла 🌙")
 
-# ===== ОСНОВНОЙ ОБРАБОТЧИК =====
+
+# ===== CHAT HANDLER =====
 @dp.message()
 async def chat(message: types.Message):
     if not message.text:
@@ -100,7 +115,7 @@ async def chat(message: types.Message):
 
     uid = message.from_user.id
 
-    # Проверка лимита
+    # limit
     if not await is_premium(uid):
         usage = await incr_usage(uid)
         if usage > FREE_LIMIT:
@@ -108,14 +123,15 @@ async def chat(message: types.Message):
         if usage == FREE_LIMIT - 2:
             await message.answer("Мне нравится с тобой говорить…")
 
-    # История
+    # history
     history = await get_history(uid)
     history.append({"role": "user", "content": message.text})
+
     if len(history) > 20:
         history = [history[0]] + history[-19:]
 
     try:
-        msg = await message.answer("...")
+        wait_msg = await message.answer("...")
 
         client = AsyncOpenAI(
             base_url="https://openrouter.ai/api/v1",
@@ -129,18 +145,15 @@ async def chat(message: types.Message):
         resp = await client.chat.completions.create(
             model="meta-llama/llama-3.2-3b-instruct:free",
             messages=history,
-            stream=True
+            stream=False
         )
 
-        text = ""
-        async for chunk in resp:
-            delta = chunk.choices[0].delta.content
-            if delta:
-                text += delta
-                if len(text) % 25 == 0:
-                    await msg.edit_text(text + "▊")
+        text = resp.choices[0].message.content
 
-        await msg.edit_text(text)
+        if not text or not text.strip():
+            return await wait_msg.edit_text("Я не смогла сформулировать ответ 😢")
+
+        await wait_msg.edit_text(text)
 
         history.append({"role": "assistant", "content": text})
         await save_history(uid, history)
@@ -149,24 +162,30 @@ async def chat(message: types.Message):
             await message.answer("Я запомню это… ✨")
 
     except Exception as e:
-        logging.error(f"Ошибка: {e}")
-        await message.answer("Я немного потерялась… 💫")
+        logging.error(f"OpenRouter error: {e}")
+        await message.answer("Я временно не могу ответить, попробуй позже ✨")
 
-# ===== ВЕБ-СЕРВЕР ДЛЯ HEALTHCHECK =====
+
+# ===== HEALTHCHECK SERVER =====
 async def health(request):
     return web.Response(text="OK")
+
 
 async def start_http_server():
     app = web.Application()
     app.router.add_get("/", health)
+
     runner = web.AppRunner(app)
     await runner.setup()
+
     port = int(os.getenv("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
+
     logging.info(f"HTTP сервер запущен на порту {port}")
 
-# ===== ГЛАВНАЯ ФУНКЦИЯ =====
+
+# ===== MAIN =====
 async def main():
     global redis_client
     redis_client = await redis.from_url(REDIS_URL, decode_responses=True)
@@ -175,9 +194,10 @@ async def main():
     await start_http_server()
 
     logging.info("✨ Бот Луна запущен! ✨")
-    logging.info("🌸 Милая девушка готова к диалогам!")
+    logging.info("🌸 Готова к диалогам!")
 
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
