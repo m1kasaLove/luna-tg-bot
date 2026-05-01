@@ -4,9 +4,12 @@ import os
 import json
 import random
 
+from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import LabeledPrice
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+
 from openai import AsyncOpenAI
 import redis.asyncio as redis
 
@@ -16,7 +19,10 @@ OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
 REDIS_URL = os.getenv("REDIS_URL")
 PROVIDER_TOKEN = os.getenv("PROVIDER_TOKEN", "")
 
-# ===== SETTINGS =====
+BASE_URL = os.getenv("BASE_URL")  # https://your-app.onrender.com
+WEBHOOK_PATH = "/webhook"
+WEBHOOK_URL = f"{BASE_URL}{WEBHOOK_PATH}"
+
 FREE_LIMIT = 20
 PRICE = 100
 
@@ -29,7 +35,7 @@ dp = Dispatcher()
 redis_client = None
 
 
-# ===== REDIS SAFE =====
+# ===== REDIS =====
 async def rget(key, default=None):
     try:
         v = await redis_client.get(key)
@@ -51,24 +57,18 @@ async def get_history(uid):
     ])
 
 
-async def save_history(uid, data):
-    await rset(f"history:{uid}", data, ex=86400)
+async def save_history(uid, h):
+    await rset(f"history:{uid}", h, ex=86400)
 
 
 async def is_premium(uid):
-    try:
-        return await redis_client.get(f"premium:{uid}") == "1"
-    except:
-        return False
+    return await redis_client.get(f"premium:{uid}") == "1"
 
 
 async def incr_usage(uid):
-    try:
-        v = await redis_client.incr(f"usage:{uid}")
-        await redis_client.expire(f"usage:{uid}", 86400)
-        return v
-    except:
-        return 0
+    v = await redis_client.incr(f"usage:{uid}")
+    await redis_client.expire(f"usage:{uid}", 86400)
+    return v
 
 
 # ===== COMMANDS =====
@@ -116,7 +116,6 @@ async def chat(message: types.Message):
 
     uid = message.from_user.id
 
-    # limit
     if not await is_premium(uid):
         u = await incr_usage(uid)
         if u > FREE_LIMIT:
@@ -124,9 +123,6 @@ async def chat(message: types.Message):
 
     history = await get_history(uid)
     history.append({"role": "user", "content": message.text})
-
-    if len(history) > 20:
-        history = [history[0]] + history[-19:]
 
     try:
         wait = await message.answer("...")
@@ -142,10 +138,7 @@ async def chat(message: types.Message):
             stream=False
         )
 
-        text = resp.choices[0].message.content or ""
-
-        if not text.strip():
-            text = "..."
+        text = resp.choices[0].message.content or "..."
 
         await wait.edit_text(text)
 
@@ -153,23 +146,42 @@ async def chat(message: types.Message):
         await save_history(uid, history)
 
     except Exception as e:
-        logging.error(f"OpenRouter error: {e}")
-        await message.answer("Ошибка. Попробуй ещё раз ✨")
+        logging.error(e)
+        await message.answer("Ошибка. Попробуй позже ✨")
 
 
-# ===== MAIN =====
-async def main():
+# ===== WEBHOOK APP =====
+async def on_startup(app: web.Application):
     global redis_client
 
     redis_client = await redis.from_url(REDIS_URL, decode_responses=True)
 
-    # важно: только webhook cleanup, без delete webhook loop
-    await bot.delete_webhook(drop_pending_updates=True)
-
-    logging.info("✨ BOT STARTED ✨")
-
-    await dp.start_polling(bot)
+    await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
+    logging.info(f"Webhook set: {WEBHOOK_URL}")
 
 
+async def on_shutdown(app: web.Application):
+    await bot.delete_webhook()
+
+
+def create_app():
+    app = web.Application()
+
+    SimpleRequestHandler(
+        dispatcher=dp,
+        bot=bot,
+    ).register(app, path=WEBHOOK_PATH)
+
+    setup_application(app, dp, bot=bot)
+
+    app.on_startup.append(on_startup)
+    app.on_shutdown.append(on_shutdown)
+
+    return app
+
+
+# ===== RUN =====
 if __name__ == "__main__":
-    asyncio.run(main())
+    port = int(os.getenv("PORT", 10000))
+    app = create_app()
+    web.run_app(app, host="0.0.0.0", port=port)
