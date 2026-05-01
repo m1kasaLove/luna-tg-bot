@@ -127,7 +127,7 @@ async def chat(message: types.Message):
         )
 
         resp = await client.chat.completions.create(
-            model="microsoft/phi-3-mini-128k-instruct:free",
+            model="meta-llama/llama-3.2-3b-instruct:free",
             messages=history,
             stream=True
         )
