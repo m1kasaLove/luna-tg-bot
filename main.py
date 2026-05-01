@@ -10,10 +10,8 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from openai import AsyncOpenAI
 
 
-# ===== CONFIG =====
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-# !!! СЮДА ВСТАВЬТЕ НОВЫЙ КЛЮЧ ОТ GROQ !!!
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_API_KEY = "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"  # ваш новый ключ
 
 BASE_URL = os.getenv("BASE_URL", "https://luna-tg-bot.onrender.com")
 WEBHOOK_PATH = "/webhook"
@@ -25,13 +23,12 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(TELEGRAM_TOKEN)
 dp = Dispatcher()
 
-# ===== GROQ CLIENT =====
+# Groq API client
 openai_client = AsyncOpenAI(
     base_url="https://api.groq.com/openai/v1",
-    api_key=GROQ_API_KEY, 
+    api_key=GROQ_API_KEY,
 )
 
-# ===== ХЕНДЛЕРЫ =====
 @dp.message(Command("start"))
 async def start(m: types.Message):
     await m.answer("Луна онлайн ✨ (Groq)")
@@ -43,9 +40,9 @@ async def chat(m: types.Message):
 
     try:
         resp = await openai_client.chat.completions.create(
-            model="deepseek-r1-distill-llama-70b", # DeepSeek через Groq
+            model="deepseek-r1-distill-llama-70b",
             messages=[
-                {"role": "system", "content": "Ты Луна. Отвечай коротко, тепло, с эмодзи ✨🌙🌸. Ты милая аниме девушка."},
+                {"role": "system", "content": "Ты — Луна. Отвечай коротко, тепло, с лёгкой заботой. Используй эмодзи ✨🌙🌸"},
                 {"role": "user", "content": m.text}
             ],
             timeout=30
@@ -54,11 +51,9 @@ async def chat(m: types.Message):
         await m.answer(text)
 
     except Exception as e:
-        logging.error(f"Groq API Error: {e}")
-        await m.answer("*легко краснеет*... Луна задумалась! Попробуй ещё раз 🌙")
+        logging.error(f"Groq error: {e}")
+        await m.answer("Сейчас перегрузка ✨ попробуй ещё раз")
 
-
-# ===== ОСТАЛЬНАЯ ЧАСТЬ КОДА (WEBHOOK, ЗАПУСК) =====
 async def on_startup(app):
     await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_webhook(WEBHOOK_URL)
