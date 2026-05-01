@@ -12,7 +12,8 @@ from openai import AsyncOpenAI
 
 # ================= CONFIG =================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
+# 🔥 DeepSeek API key (ВРЕМЕННО в коде, потом перенесите в переменные окружения)
+DEEPSEEK_KEY = "sk-50635eefc71644f0b52512e35bc89391"
 
 BASE_URL = os.getenv("BASE_URL", "https://luna-tg-bot.onrender.com")
 WEBHOOK_PATH = "/webhook"
@@ -25,52 +26,37 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(TELEGRAM_TOKEN)
 dp = Dispatcher()
 
-openai_client = AsyncOpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=OPENROUTER_KEY
+# ===== DeepSeek client =====
+deepseek_client = AsyncOpenAI(
+    base_url="https://api.deepseek.com/v1",
+    api_key=DEEPSEEK_KEY,
 )
-
-# ================= МОДЕЛИ С АВТОПЕРЕКЛЮЧЕНИЕМ =================
-# Сначала самые стабильные
-MODELS = [
-    "google/gemini-2.0-flash-exp:free",
-    "microsoft/phi-3-mini-128k-instruct:free",
-    "deepseek/deepseek-r1:free",
-    "qwen/qwen-2.5-7b-instruct:free",
-]
 
 # ================= ОБРАБОТЧИКИ =================
 @dp.message(Command("start"))
 async def start(m: types.Message):
-    await m.answer("Луна онлайн ✨")
+    await m.answer("Луна онлайн ✨ (DeepSeek)")
 
 @dp.message()
 async def chat(m: types.Message):
     if not m.text:
         return
 
-    # Пробуем все модели по очереди
-    for model in MODELS:
-        try:
-            resp = await openai_client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": "Ты — Луна. Отвечай коротко, тепло, с лёгкой заботой. Используй эмодзи ✨🌙🌸"},
-                    {"role": "user", "content": m.text}
-                ],
-                timeout=30
-            )
-            text = resp.choices[0].message.content
-            await m.answer(text)
-            return  # Успешно — выходим
+    try:
+        resp = await deepseek_client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": "Ты — Луна. Отвечай коротко, тепло, с лёгкой заботой. Используй эмодзи ✨🌙🌸"},
+                {"role": "user", "content": m.text}
+            ],
+            timeout=30
+        )
+        text = resp.choices[0].message.content
+        await m.answer(text)
 
-        except Exception as e:
-            logging.warning(f"Модель {model} не ответила: {e}")
-            await asyncio.sleep(1)  # Пауза перед следующей моделью
-            continue
-
-    # Если все модели не сработали
-    await m.answer("Сейчас перегрузка ✨ попробуй ещё раз")
+    except Exception as e:
+        logging.error(f"DeepSeek error: {e}")
+        await m.answer("Сейчас перегрузка ✨ попробуй ещё раз")
 
 # ================= WEBHOOK =================
 async def on_startup(app):
