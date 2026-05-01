@@ -30,15 +30,20 @@ SYSTEM_PROMPT = "Ты — Луна. Тёплая, мягкая, коротко �
 
 logging.basicConfig(level=logging.INFO)
 
+# ================= BOT =================
 bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
 
 redis_client = None
 
-# ================= OPENAI CLIENT =================
+# ================= OPENAI (ONE CLIENT) =================
 openai_client = AsyncOpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=OPENROUTER_KEY,
+    default_headers={
+        "HTTP-Referer": BASE_URL,
+        "X-Title": "LunaBot",
+    }
 )
 
 # ================= REDIS =================
@@ -77,7 +82,7 @@ async def incr_usage(uid):
     except:
         return 0
 
-# ================= HANDLERS =================
+# ================= COMMANDS =================
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await message.answer("Я Луна ✨")
@@ -117,6 +122,7 @@ async def chat(message: types.Message):
 
     uid = message.from_user.id
 
+    # limit
     if not await is_premium(uid):
         u = await incr_usage(uid)
         if u > FREE_LIMIT:
@@ -124,6 +130,9 @@ async def chat(message: types.Message):
 
     history = await get_history(uid)
     history.append({"role": "user", "content": message.text})
+
+    if len(history) > 25:
+        history = [history[0]] + history[-24:]
 
     try:
         wait = await message.answer("...")
@@ -140,13 +149,17 @@ async def chat(message: types.Message):
         history.append({"role": "assistant", "content": text})
         await save_history(uid, history)
 
+        if random.random() < 0.1:
+            await message.answer("Я запомню это… ✨")
+
     except Exception as e:
         logging.error(e)
         await message.answer("Я немного потерялась… 💫")
 
-# ================= LIFECYCLE FIX =================
+# ================= LIFECYCLE =================
 async def on_startup(app):
     global redis_client
+
     redis_client = await redis.from_url(REDIS_URL, decode_responses=True)
 
     await bot.delete_webhook(drop_pending_updates=True)
@@ -155,14 +168,13 @@ async def on_startup(app):
     logging.info(f"Webhook set: {WEBHOOK_URL}")
 
 async def on_cleanup(app):
-    # 💥 КРИТИЧЕСКИЙ FIX (утечки aiohttp)
     try:
         await bot.session.close()
     except:
         pass
 
     try:
-        await redis_client.close()
+        await redis_client.aclose()
     except:
         pass
 
