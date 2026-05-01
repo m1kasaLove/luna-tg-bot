@@ -127,7 +127,7 @@ async def chat(message: types.Message):
         )
 
         resp = await client.chat.completions.create(
-            model="google/gemini-2.0-flash-exp:free",
+            model="microsoft/phi-3-mini-128k-instruct:free",
             messages=history,
             stream=True
         )
