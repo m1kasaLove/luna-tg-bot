@@ -8,7 +8,7 @@ from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import LabeledPrice
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler
 
 from openai import AsyncOpenAI
 import redis.asyncio as redis
@@ -35,7 +35,7 @@ dp = Dispatcher()
 redis_client = None
 
 
-# ===== REDIS =====
+# ===== REDIS SAFE =====
 async def rget(key, default=None):
     try:
         v = await redis_client.get(key)
@@ -57,18 +57,24 @@ async def get_history(uid):
     ])
 
 
-async def save_history(uid, h):
-    await rset(f"history:{uid}", h, ex=86400)
+async def save_history(uid, data):
+    await rset(f"history:{uid}", data, ex=86400)
 
 
 async def is_premium(uid):
-    return await redis_client.get(f"premium:{uid}") == "1"
+    try:
+        return await redis_client.get(f"premium:{uid}") == "1"
+    except:
+        return False
 
 
 async def incr_usage(uid):
-    v = await redis_client.incr(f"usage:{uid}")
-    await redis_client.expire(f"usage:{uid}", 86400)
-    return v
+    try:
+        v = await redis_client.incr(f"usage:{uid}")
+        await redis_client.expire(f"usage:{uid}", 86400)
+        return v
+    except:
+        return 0
 
 
 # ===== COMMANDS =====
@@ -116,6 +122,7 @@ async def chat(message: types.Message):
 
     uid = message.from_user.id
 
+    # limit
     if not await is_premium(uid):
         u = await incr_usage(uid)
         if u > FREE_LIMIT:
@@ -129,13 +136,16 @@ async def chat(message: types.Message):
 
         client = AsyncOpenAI(
             base_url="https://openrouter.ai/api/v1",
-            api_key=OPENROUTER_KEY
+            api_key=OPENROUTER_KEY,
+            default_headers={
+                "HTTP-Referer": BASE_URL,
+                "X-Title": "LunaBot"
+            }
         )
 
         resp = await client.chat.completions.create(
             model="meta-llama/llama-3.2-3b-instruct:free",
-            messages=history,
-            stream=False
+            messages=history
         )
 
         text = resp.choices[0].message.content or "..."
@@ -145,12 +155,15 @@ async def chat(message: types.Message):
         history.append({"role": "assistant", "content": text})
         await save_history(uid, history)
 
+        if random.random() < 0.08:
+            await message.answer("Я запомню это… ✨")
+
     except Exception as e:
         logging.error(e)
-        await message.answer("Ошибка. Попробуй позже ✨")
+        await message.answer("Я немного потерялась… 💫")
 
 
-# ===== WEBHOOK APP =====
+# ===== WEBHOOK HANDLER =====
 async def on_startup(app: web.Application):
     global redis_client
 
@@ -164,15 +177,23 @@ async def on_shutdown(app: web.Application):
     await bot.delete_webhook()
 
 
+# ===== HEALTH CHECK =====
+async def health(request):
+    return web.Response(text="OK")
+
+
+# ===== APP =====
 def create_app():
     app = web.Application()
 
+    # webhook route
     SimpleRequestHandler(
         dispatcher=dp,
         bot=bot,
     ).register(app, path=WEBHOOK_PATH)
 
-    setup_application(app, dp, bot=bot)
+    # health route
+    app.router.add_get("/", health)
 
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
