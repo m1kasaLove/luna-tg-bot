@@ -3,6 +3,7 @@ import logging
 import os
 import json
 import time
+import signal
 
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
@@ -19,10 +20,9 @@ OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
 REDIS_URL = os.getenv("REDIS_URL")
 PROVIDER_TOKEN = os.getenv("PROVIDER_TOKEN", "")
 
-# ⭐ ИСПРАВЛЕНО: BASE_URL теперь гарантированно строка
-BASE_URL = os.getenv("BASE_URL", "https://luna-tg-bot.onrender.com")
+BASE_URL = os.getenv("BASE_URL")
 WEBHOOK_PATH = "/webhook"
-WEBHOOK_URL = f"{BASE_URL}{WEBHOOK_PATH}"
+WEBHOOK_URL = f"{BASE_URL}{WEBHOOK_PATH}" if BASE_URL else None
 
 FREE_LIMIT = 20
 SYSTEM_PROMPT = "Ты — Луна. Тёплая, мягкая, коротко отвечаешь ✨"
@@ -38,9 +38,13 @@ openai_client = AsyncOpenAI(
     api_key=OPENROUTER_KEY
 )
 
+# ================= GLOBAL STATE =================
+last_req = {}
+user_locks = {}
+
 # ================= HEALTH =================
-async def ping(request):
-    return web.Response(text="OK")
+async def health(request):
+    return web.json_response({"status": "ok", "ts": time.time()})
 
 # ================= REDIS SAFE =================
 async def rget(key, default=None):
@@ -66,8 +70,6 @@ async def save_history(uid, h):
     await rset(f"history:{uid}", h[-12:], ex=86400)
 
 # ================= LIMITS =================
-last_req = {}
-
 def anti_flood(uid):
     now = time.time()
     if now - last_req.get(uid, 0) < 2:
@@ -94,10 +96,6 @@ async def incr_usage(uid):
 async def start(m: types.Message):
     await m.answer("Я Луна ✨")
 
-@dp.message(Command("ping"))
-async def ping_cmd(m: types.Message):
-    await m.answer("alive")
-
 @dp.message(Command("reset"))
 async def reset(m: types.Message):
     await redis_client.delete(f"history:{m.from_user.id}")
@@ -110,6 +108,9 @@ async def chat(m: types.Message):
 
     uid = m.from_user.id
 
+    if not redis_client:
+        return await m.answer("Сервер запускается... попробуй через 5 секунд")
+
     if not anti_flood(uid):
         return await m.answer("Слишком быстро ✨")
 
@@ -117,41 +118,44 @@ async def chat(m: types.Message):
         if await incr_usage(uid) > FREE_LIMIT:
             return await m.answer("Лимит. /buy ✨")
 
-    history = await get_history(uid)
-    history.append({"role": "user", "content": m.text})
+    lock = user_locks.setdefault(uid, asyncio.Lock())
 
-    msg = await m.answer("🌙 думаю...")
+    async with lock:
+        history = await get_history(uid)
+        history.append({"role": "user", "content": m.text})
 
-    models = [
-        "google/gemini-2.0-flash-exp:free",
-        "qwen/qwen-2.5-7b-instruct:free",
-        "microsoft/phi-3-mini-128k-instruct:free"
-    ]
+        msg = await m.answer("🌙 думаю...")
 
-    for _ in range(2):
-        for model in models:
-            try:
-                resp = await openai_client.chat.completions.create(
-                    model=model,
-                    messages=history,
-                    timeout=25
-                )
+        models = [
+            "google/gemini-2.0-flash-exp:free",
+            "qwen/qwen-2.5-7b-instruct:free",
+            "microsoft/phi-3-mini-128k-instruct:free"
+        ]
 
-                text = resp.choices[0].message.content or "..."
+        for attempt in range(2):
+            for model in models:
+                try:
+                    resp = await openai_client.chat.completions.create(
+                        model=model,
+                        messages=history,
+                        timeout=25
+                    )
 
-                await msg.edit_text(text)
+                    text = resp.choices[0].message.content or "..."
 
-                history.append({"role": "assistant", "content": text})
-                await save_history(uid, history)
-                return
+                    await msg.edit_text(text)
 
-            except Exception as e:
-                logging.warning(f"{model} fail: {e}")
-                await asyncio.sleep(1)
+                    history.append({"role": "assistant", "content": text})
+                    await save_history(uid, history)
+                    return
 
-    await msg.edit_text("Сейчас перегрузка ✨ попробуй позже")
+                except Exception as e:
+                    logging.warning(f"{model} fail: {e}")
+                    await asyncio.sleep(1)
 
-# ================= PAY =================
+        await msg.edit_text("Сейчас перегрузка ✨ попробуй позже")
+
+# ================= PAYMENT =================
 @dp.message(Command("buy"))
 async def buy(m: types.Message):
     if not PROVIDER_TOKEN:
@@ -176,17 +180,29 @@ async def success(m: types.Message):
     await redis_client.set(f"premium:{m.from_user.id}", "1")
     await m.answer("✨ Premium активирован")
 
-# ================= LIFECYCLE FIX =================
+# ================= STARTUP / SHUTDOWN =================
 async def on_startup(app):
     global redis_client
 
-    # ⭐ ИСПРАВЛЕНО: добавлен await
-    redis_client = await redis.from_url(REDIS_URL, decode_responses=True)
+    redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+
+    if not WEBHOOK_URL:
+        raise RuntimeError("BASE_URL missing")
 
     await bot.delete_webhook(drop_pending_updates=True)
 
-    ok = await bot.set_webhook(WEBHOOK_URL)
-    logging.info(f"Webhook set: {ok}")
+    # stable webhook retry
+    for i in range(5):
+        try:
+            ok = await bot.set_webhook(WEBHOOK_URL)
+            logging.info(f"Webhook set attempt {i}: {ok}")
+            if ok:
+                break
+        except Exception as e:
+            logging.warning(f"Webhook retry {i}: {e}")
+            await asyncio.sleep(2)
+
+    logging.info("Luna v3 stable started")
 
 async def on_shutdown(app):
     try:
@@ -199,11 +215,23 @@ async def on_shutdown(app):
     except:
         pass
 
+# ================= SIGNAL FIX =================
+def handle_exit(*_):
+    logging.warning("Shutdown signal received")
+    try:
+        asyncio.create_task(bot.session.close())
+    except:
+        pass
+
+signal.signal(signal.SIGTERM, handle_exit)
+signal.signal(signal.SIGINT, handle_exit)
+
 # ================= APP =================
 def create_app():
     app = web.Application()
 
-    app.router.add_get("/ping", ping)
+    app.router.add_get("/", health)
+    app.router.add_get("/health", health)
 
     SimpleRequestHandler(dp, bot).register(app, path=WEBHOOK_PATH)
     setup_application(app, dp, bot=bot)
