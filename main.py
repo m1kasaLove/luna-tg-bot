@@ -19,7 +19,7 @@ OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
 REDIS_URL = os.getenv("REDIS_URL")
 PROVIDER_TOKEN = os.getenv("PROVIDER_TOKEN", "")
 
-BASE_URL = os.getenv("BASE_URL")  # https://your-app.onrender.com
+BASE_URL = https://luna-tg-bot.onrender.com
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_URL = f"{BASE_URL}{WEBHOOK_PATH}"
 
