@@ -2,10 +2,8 @@ import asyncio
 import logging
 import os
 import json
-import random
 
 from aiohttp import web
-
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import LabeledPrice
@@ -14,8 +12,7 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from openai import AsyncOpenAI
 import redis.asyncio as redis
 
-
-# ================= CONFIG =================
+# ===== ENV =====
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
 REDIS_URL = os.getenv("REDIS_URL")
@@ -32,20 +29,18 @@ SYSTEM_PROMPT = "Ты — Луна. Тёплая, мягкая, коротко �
 
 logging.basicConfig(level=logging.INFO)
 
-
-# ================= BOT =================
 bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
 
 redis_client: redis.Redis | None = None
 
-openai_client = AsyncOpenAI(
+# ===== OPENROUTER CLIENT (ОДИН РАЗ) =====
+client = AsyncOpenAI(
     base_url="https://openrouter.ai/api/v1",
-    api_key=OPENROUTER_KEY
+    api_key=OPENROUTER_KEY,
 )
 
-
-# ================= REDIS =================
+# ===== REDIS HELPERS =====
 async def rget(key, default=None):
     try:
         v = await redis_client.get(key)
@@ -67,8 +62,8 @@ async def get_history(uid):
     ])
 
 
-async def save_history(uid, data):
-    await rset(f"history:{uid}", data, ex=86400)
+async def save_history(uid, h):
+    await rset(f"history:{uid}", h, ex=86400)
 
 
 async def is_premium(uid):
@@ -81,7 +76,7 @@ async def incr_usage(uid):
     return v
 
 
-# ================= COMMANDS =================
+# ===== COMMANDS =====
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await message.answer("Я Луна ✨")
@@ -96,11 +91,10 @@ async def reset(message: types.Message):
 @dp.message(Command("buy"))
 async def buy(message: types.Message):
     prices = [LabeledPrice(label="Premium", amount=PRICE)]
-
     await bot.send_invoice(
         chat_id=message.chat.id,
-        title="Луна Premium",
-        description="Безлимитный доступ",
+        title="Луна",
+        description="Безлимит",
         payload="premium",
         provider_token=PROVIDER_TOKEN,
         currency="XTR",
@@ -119,7 +113,22 @@ async def success(message: types.Message):
     await message.answer("Теперь я всегда рядом ✨")
 
 
-# ================= CHAT (STABLE) =================
+# ===== SAFE AI CALL (429 FIX) =====
+async def ask_ai(messages):
+    for i in range(3):
+        try:
+            resp = await client.chat.completions.create(
+                model="meta-llama/llama-3.2-3b-instruct:free",
+                messages=messages,
+            )
+            return resp.choices[0].message.content or "..."
+        except Exception as e:
+            logging.error(e)
+            await asyncio.sleep(1.5 * (i + 1))
+    return "Слишком много запросов. Попробуй чуть позже ✨"
+
+
+# ===== CHAT =====
 @dp.message()
 async def chat(message: types.Message):
     if not message.text:
@@ -127,6 +136,7 @@ async def chat(message: types.Message):
 
     uid = message.from_user.id
 
+    # free limit
     if not await is_premium(uid):
         u = await incr_usage(uid)
         if u > FREE_LIMIT:
@@ -137,50 +147,24 @@ async def chat(message: types.Message):
 
     wait = await message.answer("...")
 
-    # ================= RETRY + STABILITY =================
-    for attempt in range(3):
-        try:
-            resp = await openai_client.chat.completions.create(
-                model="openai/gpt-4o-mini",
-                messages=history,
-            )
+    text = await ask_ai(history)
 
-            text = ""
+    await wait.edit_text(text)
 
-            if resp and resp.choices:
-                text = resp.choices[0].message.content or ""
-
-            text = text.strip()
-
-            if not text:
-                text = "Я немного задумалась… попробуй ещё раз 🌙"
-
-            await wait.edit_text(text)
-
-            history.append({"role": "assistant", "content": text})
-            await save_history(uid, history)
-
-            return
-
-        except Exception as e:
-            logging.error(e)
-
-            if attempt == 2:
-                await wait.edit_text("Я потерялась на секунду… попробуй ещё раз ✨")
-                return
-
-            await asyncio.sleep(1 + attempt * 2 + random.random())
+    history.append({"role": "assistant", "content": text})
+    await save_history(uid, history)
 
 
-# ================= LIFECYCLE =================
+# ===== WEBHOOK LIFECYCLE =====
 async def on_startup(app: web.Application):
     global redis_client
 
-    redis_client = await redis.from_url(REDIS_URL, decode_responses=True)
+    redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 
+    # важно: убираем старые webhook + pending updates
     await bot.delete_webhook(drop_pending_updates=True)
-    await bot.set_webhook(WEBHOOK_URL)
 
+    await bot.set_webhook(WEBHOOK_URL)
     logging.info(f"Webhook set: {WEBHOOK_URL}")
 
 
@@ -195,13 +179,10 @@ async def on_shutdown(app: web.Application):
     if redis_client:
         await redis_client.aclose()
 
-    try:
-        await bot.session.close()
-    except:
-        pass
+    await bot.session.close()
 
 
-# ================= APP =================
+# ===== APP =====
 def create_app():
     app = web.Application()
 
@@ -218,7 +199,8 @@ def create_app():
     return app
 
 
-# ================= RUN =================
+# ===== RUN =====
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))
-    web.run_app(create_app(), host="0.0.0.0", port=port)
+    app = create_app()
+    web.run_app(app, host="0.0.0.0", port=port)
