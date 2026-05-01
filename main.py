@@ -127,7 +127,7 @@ async def chat(message: types.Message):
         )
 
         resp = await client.chat.completions.create(
-            model="openrouter/free",
+            model="google/gemini-2.0-flash-exp:free",
             messages=history,
             stream=True
         )
