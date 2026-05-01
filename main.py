@@ -10,15 +10,14 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from openai import AsyncOpenAI
 
 
-# ================= CONFIG =================
+# ===== CONFIG =====
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-# 🔥 DeepSeek API key (ВРЕМЕННО в коде, потом перенесите в переменные окружения)
-DEEPSEEK_KEY = "sk-50635eefc71644f0b52512e35bc89391"
+# !!! СЮДА ВСТАВЬТЕ НОВЫЙ КЛЮЧ ОТ GROQ !!!
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 BASE_URL = os.getenv("BASE_URL", "https://luna-tg-bot.onrender.com")
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_URL = f"{BASE_URL}{WEBHOOK_PATH}"
-
 PORT = int(os.getenv("PORT", 10000))
 
 logging.basicConfig(level=logging.INFO)
@@ -26,16 +25,16 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(TELEGRAM_TOKEN)
 dp = Dispatcher()
 
-# ===== DeepSeek client =====
-deepseek_client = AsyncOpenAI(
-    base_url="https://api.deepseek.com/v1",
-    api_key=DEEPSEEK_KEY,
+# ===== GROQ CLIENT =====
+openai_client = AsyncOpenAI(
+    base_url="https://api.groq.com/openai/v1",
+    api_key=GROQ_API_KEY, 
 )
 
-# ================= ОБРАБОТЧИКИ =================
+# ===== ХЕНДЛЕРЫ =====
 @dp.message(Command("start"))
 async def start(m: types.Message):
-    await m.answer("Луна онлайн ✨ (DeepSeek)")
+    await m.answer("Луна онлайн ✨ (Groq)")
 
 @dp.message()
 async def chat(m: types.Message):
@@ -43,10 +42,10 @@ async def chat(m: types.Message):
         return
 
     try:
-        resp = await deepseek_client.chat.completions.create(
-            model="deepseek-chat",
+        resp = await openai_client.chat.completions.create(
+            model="deepseek-r1-distill-llama-70b", # DeepSeek через Groq
             messages=[
-                {"role": "system", "content": "Ты — Луна. Отвечай коротко, тепло, с лёгкой заботой. Используй эмодзи ✨🌙🌸"},
+                {"role": "system", "content": "Ты Луна. Отвечай коротко, тепло, с эмодзи ✨🌙🌸. Ты милая аниме девушка."},
                 {"role": "user", "content": m.text}
             ],
             timeout=30
@@ -55,10 +54,11 @@ async def chat(m: types.Message):
         await m.answer(text)
 
     except Exception as e:
-        logging.error(f"DeepSeek error: {e}")
-        await m.answer("Сейчас перегрузка ✨ попробуй ещё раз")
+        logging.error(f"Groq API Error: {e}")
+        await m.answer("*легко краснеет*... Луна задумалась! Попробуй ещё раз 🌙")
 
-# ================= WEBHOOK =================
+
+# ===== ОСТАЛЬНАЯ ЧАСТЬ КОДА (WEBHOOK, ЗАПУСК) =====
 async def on_startup(app):
     await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_webhook(WEBHOOK_URL)
@@ -78,6 +78,5 @@ def create_app():
     app.on_shutdown.append(on_shutdown)
     return app
 
-# ================= ЗАПУСК =================
 if __name__ == "__main__":
     web.run_app(create_app(), host="0.0.0.0", port=PORT)
