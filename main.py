@@ -11,7 +11,7 @@ from openai import AsyncOpenAI
 
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-GROQ_API_KEY = "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"  # ваш новый ключ
+GROQ_API_KEY = "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"  # ваш ключ
 
 BASE_URL = os.getenv("BASE_URL", "https://luna-tg-bot.onrender.com")
 WEBHOOK_PATH = "/webhook"
@@ -40,7 +40,7 @@ async def chat(m: types.Message):
 
     try:
         resp = await openai_client.chat.completions.create(
-            model="deepseek-r1-distill-llama-70b",
+            model="llama-3.3-70b-versatile",  # 🔥 БЕСПЛАТНАЯ МОДЕЛЬ
             messages=[
                 {"role": "system", "content": "Ты — Луна. Отвечай коротко, тепло, с лёгкой заботой. Используй эмодзи ✨🌙🌸"},
                 {"role": "user", "content": m.text}
