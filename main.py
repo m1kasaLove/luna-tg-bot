@@ -13,7 +13,7 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from openai import AsyncOpenAI
 import redis.asyncio as redis
 
-# ================= ENV =================
+# ================= CONFIG =================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
 REDIS_URL = os.getenv("REDIS_URL")
@@ -30,20 +30,15 @@ SYSTEM_PROMPT = "Ты — Луна. Тёплая, мягкая, коротко �
 
 logging.basicConfig(level=logging.INFO)
 
-# ================= BOT =================
 bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
 
 redis_client = None
 
-# 👉 ВАЖНО: один OpenAI клиент на весь бот (фикс утечек)
+# ================= OPENAI CLIENT =================
 openai_client = AsyncOpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=OPENROUTER_KEY,
-    default_headers={
-        "HTTP-Referer": BASE_URL,
-        "X-Title": "LunaBot"
-    }
 )
 
 # ================= REDIS =================
@@ -82,7 +77,7 @@ async def incr_usage(uid):
     except:
         return 0
 
-# ================= COMMANDS =================
+# ================= HANDLERS =================
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await message.answer("Я Луна ✨")
@@ -122,7 +117,6 @@ async def chat(message: types.Message):
 
     uid = message.from_user.id
 
-    # лимит
     if not await is_premium(uid):
         u = await incr_usage(uid)
         if u > FREE_LIMIT:
@@ -131,13 +125,9 @@ async def chat(message: types.Message):
     history = await get_history(uid)
     history.append({"role": "user", "content": message.text})
 
-    if len(history) > 25:
-        history = [history[0]] + history[-24:]
-
     try:
         wait = await message.answer("...")
 
-        # 🚀 быстрый запрос (без stream — стабильнее на Render)
         resp = await openai_client.chat.completions.create(
             model="meta-llama/llama-3.2-3b-instruct:free",
             messages=history
@@ -150,33 +140,33 @@ async def chat(message: types.Message):
         history.append({"role": "assistant", "content": text})
         await save_history(uid, history)
 
-        if random.random() < 0.1:
-            await message.answer("Я запомню это… ✨")
-
     except Exception as e:
-        logging.error(f"AI error: {e}")
+        logging.error(e)
         await message.answer("Я немного потерялась… 💫")
 
-# ================= WEBHOOK =================
+# ================= LIFECYCLE FIX =================
 async def on_startup(app):
     global redis_client
-
     redis_client = await redis.from_url(REDIS_URL, decode_responses=True)
 
-    # 🔥 важно: всегда сбрасываем старые webhook
     await bot.delete_webhook(drop_pending_updates=True)
-
     await bot.set_webhook(WEBHOOK_URL)
 
     logging.info(f"Webhook set: {WEBHOOK_URL}")
 
-async def on_shutdown(app):
-    await bot.delete_webhook()
+async def on_cleanup(app):
+    # 💥 КРИТИЧЕСКИЙ FIX (утечки aiohttp)
+    try:
+        await bot.session.close()
+    except:
+        pass
 
-    # важно закрыть сессии
-    await bot.session.close()
-    await redis_client.close()
+    try:
+        await redis_client.close()
+    except:
+        pass
 
+# ================= APP =================
 def create_app():
     app = web.Application()
 
@@ -184,7 +174,7 @@ def create_app():
     setup_application(app, dp, bot=bot)
 
     app.on_startup.append(on_startup)
-    app.on_shutdown.append(on_shutdown)
+    app.on_cleanup.append(on_cleanup)
 
     return app
 
