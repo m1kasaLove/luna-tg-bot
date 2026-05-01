@@ -3,6 +3,7 @@ import logging
 import os
 import json
 import time
+import atexit
 
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types
@@ -21,7 +22,9 @@ BASE_URL = os.getenv("BASE_URL")
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_URL = f"{BASE_URL}{WEBHOOK_PATH}"
 
-SYSTEM_PROMPT = "Ты — Луна. Коротко, тепло ✨"
+PORT = int(os.getenv("PORT", 10000))
+
+SYSTEM_PROMPT = "Ты — Луна. Тёплая, короткая, мягкая ✨"
 FREE_LIMIT = 20
 
 logging.basicConfig(level=logging.INFO)
@@ -30,16 +33,16 @@ bot = Bot(TELEGRAM_TOKEN)
 dp = Dispatcher()
 
 redis_client = None
-queue = asyncio.Queue()
+queue = asyncio.Queue(maxsize=100)
 
 openai = AsyncOpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=OPENROUTER_KEY
 )
 
-# ================= CIRCUIT BREAKER =================
-model_failures = {}
-model_disabled_until = {}
+# ================= STATE =================
+user_locks = {}
+last_request = {}
 
 MODELS = [
     "google/gemini-2.0-flash-exp:free",
@@ -62,66 +65,72 @@ async def rset(k, v, ex=86400):
         pass
 
 # ================= LIMITS =================
-async def incr(uid):
+def anti_flood(uid):
+    now = time.time()
+    if now - last_request.get(uid, 0) < 2:
+        return False
+    last_request[uid] = now
+    return True
+
+# ================= USER =================
+async def premium(uid):
+    return await redis_client.get(f"premium:{uid}") == "1"
+
+async def usage(uid):
     v = await redis_client.incr(f"u:{uid}")
     await redis_client.expire(f"u:{uid}", 86400)
     return v
 
-async def premium(uid):
-    return await redis_client.get(f"p:{uid}") == "1"
-
 # ================= HISTORY =================
 async def history(uid):
-    return await rget(f"h:{uid}", [{"role": "system", "content": SYSTEM_PROMPT}])
+    return await rget(f"h:{uid}", [
+        {"role": "system", "content": SYSTEM_PROMPT}
+    ])
 
 async def save(uid, h):
-    await rset(f"h:{uid}", h[-10:])
+    await rset(f"h:{uid}", h[-12:])
 
-# ================= MODEL ROUTER =================
+# ================= CIRCUIT + ROUTER =================
+model_fail = {}
+model_block = {}
+
 def pick_model():
     now = time.time()
-
     for m in MODELS:
-        if model_disabled_until.get(m, 0) < now:
+        if model_block.get(m, 0) < now:
             return m
-
     return MODELS[0]
 
-def mark_fail(model):
-    model_failures[model] = model_failures.get(model, 0) + 1
-
-    if model_failures[model] >= 3:
-        model_disabled_until[model] = time.time() + 60  # 1 min cooldown
-        model_failures[model] = 0
+def mark_fail(m):
+    model_fail[m] = model_fail.get(m, 0) + 1
+    if model_fail[m] >= 3:
+        model_block[m] = time.time() + 60
+        model_fail[m] = 0
 
 # ================= LLM =================
-async def call_llm(messages):
+async def call_llm(msgs):
     for _ in range(3):
         model = pick_model()
-
         try:
             r = await openai.chat.completions.create(
                 model=model,
-                messages=messages,
+                messages=msgs,
                 timeout=25
             )
             return r.choices[0].message.content
-
         except Exception as e:
-            logging.warning(f"{model} failed: {e}")
+            logging.warning(f"{model} fail: {e}")
             mark_fail(model)
             await asyncio.sleep(1)
-
     return None
 
-# ================= WORKER QUEUE =================
+# ================= WORKER (QUEUE) =================
 async def worker():
     while True:
-        ctx = await queue.get()
-
-        uid = ctx["uid"]
-        msg = ctx["msg"]
-        wait = ctx["wait"]
+        job = await queue.get()
+        uid = job["uid"]
+        msg = job["msg"]
+        wait = job["wait"]
 
         try:
             h = await history(uid)
@@ -141,10 +150,9 @@ async def worker():
         except Exception as e:
             logging.error(e)
 
-        finally:
-            queue.task_done()
+        queue.task_done()
 
-# ================= HANDLER =================
+# ================= HANDLERS =================
 @dp.message(Command("start"))
 async def start(m: types.Message):
     await m.answer("Луна онлайн ✨")
@@ -152,7 +160,7 @@ async def start(m: types.Message):
 @dp.message(Command("reset"))
 async def reset(m: types.Message):
     await redis_client.delete(f"h:{m.from_user.id}")
-    await m.answer("Готово 🌙")
+    await m.answer("Очищено 🌙")
 
 @dp.message()
 async def chat(m: types.Message):
@@ -161,8 +169,11 @@ async def chat(m: types.Message):
 
     uid = m.from_user.id
 
+    if not anti_flood(uid):
+        return await m.answer("Слишком быстро ✨")
+
     if not await premium(uid):
-        if await incr(uid) > FREE_LIMIT:
+        if await usage(uid) > FREE_LIMIT:
             return await m.answer("Лимит ✨ /buy")
 
     wait = await m.answer("🌙 думаю...")
@@ -173,20 +184,37 @@ async def chat(m: types.Message):
         "wait": wait
     })
 
+# ================= WEBHOOK FIX =================
+async def set_webhook_safe():
+    for i in range(5):
+        try:
+            await bot.delete_webhook(drop_pending_updates=True)
+            await bot.set_webhook(WEBHOOK_URL)
+            logging.info(f"Webhook OK: {WEBHOOK_URL}")
+            return
+        except Exception as e:
+            logging.warning(f"Webhook retry {i}: {e}")
+            await asyncio.sleep(3)
+
 # ================= STARTUP =================
 async def on_startup(app):
     global redis_client
 
     redis_client = await redis.from_url(REDIS_URL, decode_responses=True)
 
-    await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
+    await set_webhook_safe()
 
     asyncio.create_task(worker())
 
-    logging.info("Luna v3 started")
+    logging.info("Luna v4 started")
 
-# ================= SHUTDOWN =================
+# ================= SHUTDOWN FIX =================
 async def on_shutdown(app):
+    try:
+        await bot.delete_webhook()
+    except:
+        pass
+
     try:
         await bot.session.close()
     except:
@@ -196,6 +224,17 @@ async def on_shutdown(app):
         await redis_client.aclose()
     except:
         pass
+
+# ================= SAFE EXIT =================
+def safe_exit():
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            loop.create_task(bot.session.close())
+    except:
+        pass
+
+atexit.register(safe_exit)
 
 # ================= APP =================
 def create_app():
@@ -210,5 +249,8 @@ def create_app():
     return app
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 10000))
-    web.run_app(create_app(), host="0.0.0.0", port=port)
+    web.run_app(
+        create_app(),
+        host="0.0.0.0",
+        port=PORT
+    )
