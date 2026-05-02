@@ -8,12 +8,11 @@ from aiogram.filters import Command
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 from openai import AsyncOpenAI
+from httpx import Timeout
 
 # ===== ENV =====
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-
-# fallback если Render тупит
-POLZA_API_KEY = os.getenv("POLZA_API_KEY") or "pza_FiV3Pscoe4xKEor8l42rfOnNQ5baXMwM"
+POLZA_API_KEY = os.getenv("POLZA_API_KEY")
 
 BASE_URL = os.getenv("BASE_URL", "https://luna-tg-bot.onrender.com")
 WEBHOOK_PATH = "/webhook"
@@ -25,10 +24,11 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(TELEGRAM_TOKEN)
 dp = Dispatcher()
 
-# ===== CLIENT =====
+# ===== AI CLIENT =====
 openai_client = AsyncOpenAI(
     base_url="https://api.polza.ai/v1",
     api_key=POLZA_API_KEY,
+    timeout=Timeout(30.0)
 )
 
 # ===== AI =====
@@ -38,43 +38,81 @@ async def ask_ai(messages):
             resp = await openai_client.chat.completions.create(
                 model="deepseek/deepseek-chat-v3-0324",
                 messages=messages,
-                timeout=30
             )
 
             text = resp.choices[0].message.content
             if not text:
-                return "Я задумалась... напиши ещё раз"
+                return "..."
 
-            return text[:4000]
+            return text.strip()
 
         except Exception as e:
-            logging.error(f"AI error: {e}")
+            logging.error(f"AI error attempt {i+1}: {e}")
             await asyncio.sleep(1.5 * (i + 1))
 
-    return "Сейчас небольшая перегрузка, попробуй чуть позже"
+    return "Сейчас перегрузка, попробуй позже"
+
+# ===== TYPING EFFECT =====
+async def type_message(message: types.Message, text: str):
+    """
+    Реалистичный эффект печатания через editMessageText
+    """
+
+    if len(text) < 20:
+        await message.answer(text)
+        return
+
+    sent = await message.answer("...")
+
+    buffer = ""
+    step = max(1, len(text) // 40)  # ~40 обновлений
+
+    for i in range(0, len(text), step):
+        buffer = text[:i]
+
+        try:
+            await bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=sent.message_id,
+                text=buffer + "▌"
+            )
+        except:
+            pass
+
+        await asyncio.sleep(0.03)
+
+    await bot.edit_message_text(
+        chat_id=message.chat.id,
+        message_id=sent.message_id,
+        text=text
+    )
 
 # ===== HANDLERS =====
 @dp.message(Command("start"))
 async def start(m: types.Message):
-    await m.answer("Луна онлайн")
+    await m.answer("Луна онлайн ✨")
 
 @dp.message()
 async def chat(m: types.Message):
     if not m.text:
         return
 
-    # ✨ эффект печатания
     await bot.send_chat_action(m.chat.id, "typing")
 
-    text = await ask_ai([
-        {
-            "role": "system",
-            "content": "Ты — Луна. Отвечай коротко, спокойно и тепло. Без лишних эмоций и с минимальным количеством эмодзи."
-        },
-        {"role": "user", "content": m.text}
-    ])
+    try:
+        text = await ask_ai([
+            {
+                "role": "system",
+                "content": "Ты — Луна. Отвечай спокойно, тепло и кратко."
+            },
+            {"role": "user", "content": m.text}
+        ])
 
-    await m.answer(text)
+        await type_message(m, text)
+
+    except Exception as e:
+        logging.exception(f"HANDLER ERROR: {e}")
+        await m.answer("Ошибка... попробуй ещё раз")
 
 # ===== WEB =====
 async def root(request):
