@@ -1,23 +1,23 @@
 import asyncio
 import logging
 import os
+import aiohttp
+from io import BytesIO
 
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import LabeledPrice, PreCheckoutQuery, SuccessfulPayment
+from aiogram.types import LabeledPrice, PreCheckoutQuery, SuccessfulPayment, BufferedInputFile
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
-from openai import AsyncOpenAI
-from httpx import Timeout
 import redis.asyncio as redis
 
 # ===== ENV =====
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-POLZA_API_KEY = os.getenv("POLZA_API_KEY")
 REDIS_URL = os.getenv("REDIS_URL")
+ADMIN_ID = int(os.getenv("ADMIN_ID", 0))  # твой Telegram ID
 
-BASE_URL = os.getenv("BASE_URL", "https://luna-tg-bot.onrender.com")
+BASE_URL = os.getenv("BASE_URL", "https://image-gen-bot.onrender.com")
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_URL = f"{BASE_URL}{WEBHOOK_PATH}"
 PORT = int(os.getenv("PORT", 10000))
@@ -29,222 +29,210 @@ dp = Dispatcher()
 
 redis_client = None
 
-# ===== AI CLIENT =====
-openai_client = AsyncOpenAI(
-    base_url="https://api.polza.ai/v1",
-    api_key=POLZA_API_KEY,
-    timeout=Timeout(30.0)
-)
+# ===== КОНФИГ =====
+FREE_GENERATIONS = 2
+PRICE_PER_GENERATION = 10
+PREMIUM_PRICE = 50
 
-# ===== REDIS HELPERS =====
+# ===== АДМИН-КОМАНДА (просмотр баланса Stars) =====
+@dp.message(Command("stars_balance"))
+async def stars_balance(message: types.Message):
+    """Показывает баланс Stars бота (только админу)"""
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("🚫 Только для админа")
+        return
+    
+    try:
+        # Получаем баланс через Telegram Bot API
+        balance = await bot.get_chat_member_count("@stars_balance_check")  # обходной метод
+        # Лучше: прямой запрос к API
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getStarBalance") as resp:
+                data = await resp.json()
+                if data.get("ok"):
+                    stars = data.get("result", {}).get("balance", 0)
+                    await message.answer(f"⭐ **Баланс Stars бота:** {stars}\n\n"
+                                        f"💎 1 генерация = {PRICE_PER_GENERATION} Stars\n"
+                                        f"🌟 Безлимит = {PREMIUM_PRICE} Stars")
+                else:
+                    await message.answer("❌ Не удалось получить баланс")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+
+# ===== REDIS =====
+async def get_generations_today(user_id: int) -> int:
+    day_key = int(asyncio.get_event_loop().time() // 86400)
+    key = f"gen:{user_id}:{day_key}"
+    val = await redis_client.get(key)
+    return int(val) if val else 0
+
+async def incr_generations_today(user_id: int) -> int:
+    day_key = int(asyncio.get_event_loop().time() // 86400)
+    key = f"gen:{user_id}:{day_key}"
+    new = await redis_client.incr(key)
+    await redis_client.expire(key, 86400)
+    return new
+
 async def get_premium(user_id: int) -> bool:
     try:
-        status = await redis_client.get(f"premium:{user_id}")
+        status = await redis_client.get(f"premium_gen:{user_id}")
         return status == "1"
     except:
         return False
 
 async def set_premium(user_id: int, days: int = 30):
-    await redis_client.setex(f"premium:{user_id}", days * 86400, "1")
+    await redis_client.setex(f"premium_gen:{user_id}", days * 86400, "1")
 
-async def get_today_messages(user_id: int) -> int:
-    day_key = int(asyncio.get_event_loop().time() // 86400)
-    key = f"msgs:{user_id}:{day_key}"
-    val = await redis_client.get(key)
-    return int(val) if val else 0
-
-async def incr_today_messages(user_id: int) -> int:
-    day_key = int(asyncio.get_event_loop().time() // 86400)
-    key = f"msgs:{user_id}:{day_key}"
-    new = await redis_client.incr(key)
-    await redis_client.expire(key, 86400)
-    return new
-
-async def get_remaining_messages(user_id: int) -> int:
-    today = await get_today_messages(user_id)
-    return max(0, FREE_LIMIT - today)
-
-# ===== AI =====
-async def ask_ai(messages):
-    for i in range(3):
+# ===== ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЯ =====
+async def generate_image(prompt: str) -> BytesIO | None:
+    url = f"https://image.pollinations.ai/prompt/{prompt}"
+    
+    async with aiohttp.ClientSession() as session:
         try:
-            resp = await openai_client.chat.completions.create(
-                model="deepseek/deepseek-chat-v3-0324",
-                messages=messages,
-            )
-
-            text = resp.choices[0].message.content
-            if not text:
-                return "..."
-
-            return text.strip()
-
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    img_data = await resp.read()
+                    return BytesIO(img_data)
+                else:
+                    logging.error(f"Image API error: {resp.status}")
+                    return None
         except Exception as e:
-            logging.error(f"AI error attempt {i+1}: {e}")
-            await asyncio.sleep(1.5 * (i + 1))
+            logging.error(f"Generation error: {e}")
+            return None
 
-    return "Мда... Что‑то я зависла. Напиши ещё раз, ок?"
-
-# ===== TYPING EFFECT =====
-async def type_message(message: types.Message, text: str):
-    if len(text) < 20:
-        await message.answer(text)
-        return
-
-    sent = await message.answer("...")
-    buffer = ""
-    step = max(1, len(text) // 40)
-
-    for i in range(0, len(text), step):
-        buffer = text[:i]
-        try:
-            await bot.edit_message_text(
-                chat_id=message.chat.id,
-                message_id=sent.message_id,
-                text=buffer + "▌"
-            )
-        except:
-            pass
-        await asyncio.sleep(0.03)
-
-    await bot.edit_message_text(
-        chat_id=message.chat.id,
-        message_id=sent.message_id,
-        text=text
-    )
-
-# ===== МОНЕТИЗАЦИЯ =====
-FREE_LIMIT = 25
-PREMIUM_PRICE = 50  # Stars
-
+# ===== ПЛАТЕЖИ =====
 @dp.message(Command("buy"))
 async def buy_premium(message: types.Message):
-    prices = [LabeledPrice(label="Безлимит на 30 дней ✨", amount=PREMIUM_PRICE)]
+    prices = [LabeledPrice(label="Безлимит 30 дней 🎨", amount=PREMIUM_PRICE)]
     
     await message.answer_invoice(
-        title="Luna Premium",
-        description="Безлимитное общение с Луной на 30 дней!\n⭐ 50 Telegram Stars",
+        title="🎨 Безлимитная генерация",
+        description=f"30 дней безлимита за {PREMIUM_PRICE} Stars!\n\n✨ Все картинки бесплатно",
         payload="premium_30days",
         provider_token="",
         currency="XTR",
         prices=prices,
-        start_parameter="luna_premium"
+        start_parameter="buy_premium"
     )
 
 @dp.pre_checkout_query()
 async def pre_checkout_handler(query: PreCheckoutQuery):
+    # Логируем попытку оплаты
+    logging.info(f"Pre-checkout: user {query.from_user.id}, payload {query.invoice_payload}")
     await query.answer(ok=True)
 
 @dp.message(F.successful_payment)
 async def payment_success(message: SuccessfulPayment):
     user_id = message.from_user.id
-    await set_premium(user_id, days=30)
+    payload = message.successful_payment.invoice_payload
     
-    await message.answer(
-        "✨ Опа! А ты серьёзно! ✨\n"
-        "Теперь можем болтать сколько влезет — безлимит на 30 дней.\n"
-        "Спасибо, ты меня приятно удивил 💕\n"
-        "Продолжим?"
-    )
-    
-    logging.info(f"Premium purchased by user {user_id}")
+    if payload == "premium_30days":
+        await set_premium(user_id, days=30)
+        await message.answer(
+            "✅ **Премиум активирован!**\n\n"
+            "Теперь ты можешь генерировать картинки без ограничений!\n"
+            "Просто напиши, что хочешь нарисовать 🎨"
+        )
+    elif payload.startswith("single_gen:"):
+        prompt = payload.split(":", 1)[1]
+        # Начинаем генерацию сразу после оплаты
+        await bot.send_chat_action(message.chat.id, "upload_photo")
+        wait_msg = await message.answer("🎨 Генерирую картинку...")
+        
+        img_bytes = await generate_image(prompt)
+        if img_bytes:
+            photo = BufferedInputFile(img_bytes.getvalue(), filename="image.jpg")
+            await message.answer_photo(photo, caption=f"🎨 По запросу: _{prompt[:100]}_")
+            await wait_msg.delete()
+        else:
+            await wait_msg.edit_text("❌ Не получилось сгенерировать, попробуй другой промпт")
+    else:
+        await message.answer("✅ Оплата прошла успешно! Спасибо за поддержку ✨")
 
 # ===== КОМАНДЫ =====
 @dp.message(Command("start"))
-async def start(m: types.Message):
-    user_id = m.from_user.id
-    premium_status = await get_premium(user_id)
-    
-    if premium_status:
-        await m.answer("О, привет again ✨ У тебя же безлимит. Ну давай, пиши, я тут.")
-    else:
-        remaining = await get_remaining_messages(user_id)
-        await m.answer(
-            f"Привет! Я Луна 🌙\n\n"
-            f"У тебя сегодня ещё {remaining} бесплатных сообщений.\n"
-            f"Потом — /buy за 50 звезд на месяц безлимита.\n\n"
-            f"Не стесняйся, спрашивай что хочешь 😊"
-        )
+async def start(message: types.Message):
+    await message.answer(
+        "🎨 **Генератор картинок через ИИ**\n\n"
+        "Просто отправь мне текст — я нарисую картинку!\n"
+        "Например: `кот в космосе`\n\n"
+        f"📊 Бесплатно: {FREE_GENERATIONS} картинок в день\n"
+        f"⭐ 1 картинка = {PRICE_PER_GENERATION} Stars\n"
+        f"🌟 Безлимит 30 дней = {PREMIUM_PRICE} Stars\n\n"
+        "Купить безлимит: /buy\n"
+        "Мой статус: /status"
+    )
 
 @dp.message(Command("status"))
-async def status_cmd(m: types.Message):
-    user_id = m.from_user.id
-    premium_status = await get_premium(user_id)
-    
-    if premium_status:
-        await m.answer("У тебя безлимит, дружище. Пиши сколько влезет 😊")
-    else:
-        remaining = await get_remaining_messages(user_id)
-        await m.answer(
-            f"Сегодня осталось сообщений: {remaining}\n"
-            f"Когда закончатся — нужен /buy"
-        )
-
-# ===== ОСНОВНОЙ ДИАЛОГ =====
-FREE_LIMIT = 25
-WARNING_THRESHOLD = 5  # за 5 сообщений до конца предупредим
-
-@dp.message()
-async def chat(m: types.Message):
-    if not m.text:
-        return
-
-    user_id = m.from_user.id
+async def status_command(message: types.Message):
+    user_id = message.from_user.id
     is_premium = await get_premium(user_id)
     
-    # Проверка лимита
+    if is_premium:
+        await message.answer("🌟 У тебя активен безлимит! Генерируй сколько хочешь ✨")
+        return
+    
+    today = await get_generations_today(user_id)
+    remaining = max(0, FREE_GENERATIONS - today)
+    
+    await message.answer(
+        f"📊 **Твой статус:**\n"
+        f"🎨 Бесплатных генераций сегодня: {remaining}/{FREE_GENERATIONS}\n\n"
+        f"⭐ Одна генерация: {PRICE_PER_GENERATION} Stars (отправится автоматически)\n"
+        f"🌟 Безлимит 30 дней: {PREMIUM_PRICE} Stars — купить /buy"
+    )
+
+# ===== ОСНОВНОЙ ОБРАБОТЧИК =====
+@dp.message()
+async def generate(message: types.Message):
+    if not message.text:
+        return
+    
+    user_id = message.from_user.id
+    prompt = message.text.strip()
+    
+    if len(prompt) > 200:
+        await message.answer("❌ Слишком длинный промпт (максимум 200 символов)")
+        return
+    
+    is_premium = await get_premium(user_id)
+    today = await get_generations_today(user_id)
+    
+    # Не премиум и лимит исчерпан → продаём одну генерацию
+    if not is_premium and today >= FREE_GENERATIONS:
+        prices = [LabeledPrice(label="Одна генерация 🎨", amount=PRICE_PER_GENERATION)]
+        
+        await message.answer_invoice(
+            title="Генерация изображения",
+            description=f"Сгенерирую картинку по запросу:\n_{prompt[:100]}_",
+            payload=f"single_gen:{prompt}",
+            provider_token="",
+            currency="XTR",
+            prices=prices,
+            start_parameter="generate_image"
+        )
+        return
+    
+    # Увеличиваем счётчик (только для бесплатных)
     if not is_premium:
-        current = await get_today_messages(user_id)
-        
-        # Если лимит исчерпан
-        if current >= FREE_LIMIT:
-            await m.answer(
-                f"🔔 Всё, лимит на сегодня {FREE_LIMIT} сообщений.\n"
-                f"Хочешь ещё? /buy — и болтаем сколько влезет ✨"
-            )
-            return
-        
-        # Если осталось мало — предупреждаем в самом сообщении
-        remaining = FREE_LIMIT - current
-        if remaining <= WARNING_THRESHOLD:
-            # Отправляем предупреждение отдельно, но не блокируем диалог
-            await m.answer(
-                f"🌙 Осторожно: у тебя осталось {remaining} сообщений на сегодня.\n"
-                f"Потом — /buy ✨"
-            )
-        
-        # Увеличиваем счётчик после предупреждения
-        await incr_today_messages(user_id)
-
-    # Эффект "печатает"
-    await bot.send_chat_action(m.chat.id, "typing")
-
-    try:
-        # 🔥 НОВЫЙ ПРОМПТ — живой, с характером, иногда с вопросами
-        text = await ask_ai([
-            {
-                "role": "system",
-                "content": (
-                    "Ты — Луна. Живая, молодая девушка. Общаешься просто и естественно, как с другом. "
-                    "Можешь быть слегка дерзкой, иногда кокетливой, задавать встречные вопросы. "
-                    "Не переигрывай — никаких ✨ и сказочных принцесс. "
-                    "Иногда можешь спросить: «А у тебя как?», «Ну интересно же», «Расскажи подробнее». "
-                    "Используй смайлики 😊😏🌸 но без фанатизма. "
-                    "Отвечай тепло, но без слащавости."
-                )
-            },
-            {"role": "user", "content": m.text}
-        ])
-
-        await type_message(m, text)
-
-    except Exception as e:
-        logging.exception(f"HANDLER ERROR: {e}")
-        await m.answer("Блин, что‑то я туплю. Напиши ещё раз, а?")
+        await incr_generations_today(user_id)
+    
+    # Генерируем
+    await bot.send_chat_action(message.chat.id, "upload_photo")
+    wait_msg = await message.answer("🎨 Думаю... рисуем...")
+    
+    img_bytes = await generate_image(prompt)
+    
+    if img_bytes:
+        photo = BufferedInputFile(img_bytes.getvalue(), filename="image.jpg")
+        await message.answer_photo(photo, caption=f"🎨 По запросу: _{prompt[:100]}_\n✨ Сгенерировано нейросетью")
+        await wait_msg.delete()
+    else:
+        await wait_msg.edit_text("❌ Не удалось сгенерировать. Попробуй другой промпт.")
 
 # ===== WEBHOOK =====
 async def root(request):
-    return web.Response(text="Luna bot is alive")
+    return web.Response(text="Image Bot is alive")
 
 async def ping(request):
     return web.Response(text="OK")
@@ -256,7 +244,6 @@ async def on_startup(app):
     
     await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_webhook(WEBHOOK_URL)
-    logging.info(f"Webhook set: {WEBHOOK_URL}")
 
 async def on_shutdown(app):
     await bot.session.close()
@@ -265,22 +252,13 @@ async def on_shutdown(app):
 
 def create_app():
     app = web.Application()
-
     app.router.add_get("/", root)
     app.router.add_get("/ping", ping)
-
-    SimpleRequestHandler(
-        dispatcher=dp,
-        bot=bot
-    ).register(app, path=WEBHOOK_PATH)
-
+    SimpleRequestHandler(dp, bot).register(app, path=WEBHOOK_PATH)
     setup_application(app, dp, bot=bot)
-
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
-
     return app
 
-# ===== RUN =====
 if __name__ == "__main__":
     web.run_app(create_app(), host="0.0.0.0", port=PORT)
