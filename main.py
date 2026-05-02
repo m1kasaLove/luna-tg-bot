@@ -11,7 +11,7 @@ from openai import AsyncOpenAI
 
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-GROQ_API_KEY = "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"  # ваш ключ
+POLZA_API_KEY = "pza_FiV3Pscoe4xKEor8l42rfOnNQ5baXMwM"
 
 BASE_URL = os.getenv("BASE_URL", "https://luna-tg-bot.onrender.com")
 WEBHOOK_PATH = "/webhook"
@@ -23,15 +23,14 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(TELEGRAM_TOKEN)
 dp = Dispatcher()
 
-# Groq API client
 openai_client = AsyncOpenAI(
-    base_url="https://api.groq.com/openai/v1",
-    api_key=GROQ_API_KEY,
+    base_url="https://api.polza.ai/v1",
+    api_key=POLZA_API_KEY,
 )
 
 @dp.message(Command("start"))
 async def start(m: types.Message):
-    await m.answer("Луна онлайн ✨ (Groq)")
+    await m.answer("Луна онлайн ✨ (DeepSeek V3)")
 
 @dp.message()
 async def chat(m: types.Message):
@@ -40,7 +39,7 @@ async def chat(m: types.Message):
 
     try:
         resp = await openai_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",  # 🔥 БЕСПЛАТНАЯ МОДЕЛЬ
+            model="deepseek/deepseek-chat-v3-0324",  # 🔥 DeepSeek V3
             messages=[
                 {"role": "system", "content": "Ты — Луна. Отвечай коротко, тепло, с лёгкой заботой. Используй эмодзи ✨🌙🌸"},
                 {"role": "user", "content": m.text}
@@ -51,7 +50,7 @@ async def chat(m: types.Message):
         await m.answer(text)
 
     except Exception as e:
-        logging.error(f"Groq error: {e}")
+        logging.error(f"Polza error: {e}")
         await m.answer("Сейчас перегрузка ✨ попробуй ещё раз")
 
 async def on_startup(app):
