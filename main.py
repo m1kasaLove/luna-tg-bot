@@ -25,7 +25,7 @@ ADMIN_ID = 532229128
 BASE_URL = os.getenv("BASE_URL", "https://selenaartbot.onrender.com")
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_URL = f"{BASE_URL}{WEBHOOK_PATH}"
-PORT = int(os.getenv("PORT", 10000"))
+PORT = int(os.getenv("PORT", 10000))
 
 logging.basicConfig(level=logging.INFO)
 
