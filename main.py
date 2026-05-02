@@ -2,6 +2,8 @@ import asyncio
 import logging
 import os
 import aiohttp
+import random
+from datetime import datetime
 
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
@@ -17,7 +19,7 @@ import redis.asyncio as redis
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 POLZA_API_KEY = os.getenv("POLZA_API_KEY")
 REDIS_URL = os.getenv("REDIS_URL")
-ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
+ADMIN_ID = 532229128  # твой ID
 
 BASE_URL = os.getenv("BASE_URL", "https://luna-tg-bot.onrender.com")
 WEBHOOK_PATH = "/webhook"
@@ -32,7 +34,7 @@ dp = Dispatcher()
 redis_client = None
 
 # ===== КОНФИГ =====
-FREE_LIMIT = 25
+FREE_LIMIT = 30
 PREMIUM_PRICE = 50
 WARNING_THRESHOLD = 5
 
@@ -47,7 +49,7 @@ openai_client = AsyncOpenAI(
 def is_admin(user_id: int) -> bool:
     return user_id == ADMIN_ID
 
-# ===== REDIS HELPER =====
+# ===== REDIS =====
 async def get_premium(user_id: int) -> bool:
     try:
         status = await redis_client.get(f"premium:{user_id}")
@@ -85,7 +87,7 @@ async def reset_user_limit(user_id: int):
     for key in keys:
         await redis_client.delete(key)
 
-# ===== AI =====
+# ===== ЖИВАЯ ЛУНА =====
 async def ask_ai(messages):
     for i in range(3):
         try:
@@ -95,20 +97,20 @@ async def ask_ai(messages):
             )
             text = resp.choices[0].message.content
             if not text:
-                return "..."
+                return "😏 Ну давай, напиши что-нибудь интересное..."
             return text.strip()
         except Exception as e:
             logging.error(f"AI error attempt {i+1}: {e}")
             await asyncio.sleep(1.5 * (i + 1))
-    return "Мда... Что‑то я зависла. Напиши ещё раз, ок?"
+    return "😅 Чёт я затупила... Напиши ещё раз, а?"
 
-# ===== TYPING EFFECT =====
+# ===== ЭФФЕКТ ПЕЧАТАНИЯ =====
 async def type_message(message: types.Message, text: str):
     if len(text) < 20:
         await message.answer(text)
         return
     sent = await message.answer("...")
-    step = max(1, len(text) // 40)
+    step = max(1, len(text) // 35)
     for i in range(0, len(text), step):
         try:
             await bot.edit_message_text(
@@ -118,41 +120,39 @@ async def type_message(message: types.Message, text: str):
             )
         except:
             pass
-        await asyncio.sleep(0.03)
+        await asyncio.sleep(0.02)
     await bot.edit_message_text(
         chat_id=message.chat.id,
         message_id=sent.message_id,
         text=text
     )
 
-# ================= МЕНЮ (ДЛЯ ВСЕХ ПОЛЬЗОВАТЕЛЕЙ) =================
+# ================= МЕНЮ =================
 @dp.message(Command("menu"))
 @dp.message(Command("help"))
 async def show_menu(message: types.Message):
     menu_text = (
-        "🌙 **Меню команд Луны** 🌙\n\n"
-        "📋 **Основные команды:**\n"
-        "/start — начать диалог со мной\n"
-        "/menu или /help — показать это меню\n"
-        "/status — узнать остаток бесплатных сообщений\n"
-        "/buy — купить безлимит за 50 Stars (30 дней)\n\n"
-        "💬 **Как общаться:**\n"
-        "Просто пиши мне сообщения — я отвечаю как живой человек 😊\n\n"
-        "✨ У меня есть характер: могу быть слегка дерзкой, кокетливой,\n"
-        "задавать вопросы и поддерживать любой разговор.\n\n"
-        f"📖 Бесплатно: {FREE_LIMIT} сообщений в день\n"
-        f"⭐ Безлимит: {PREMIUM_PRICE} Stars на 30 дней\n\n"
-        "💕 Спрашивай что хочешь, я всегда здесь!"
+        "🌙 **Луна — твоя виртуальная подружка** 🌙\n\n"
+        "📋 **Команды:**\n"
+        "/start — начать общение\n"
+        "/menu — это меню\n"
+        "/status — сколько осталось сообщений\n"
+        "/buy — купить безлимит (50 Stars на 30 дней)\n\n"
+        "💬 **Обо мне:**\n"
+        "Я люблю поболтать, могу быть навязчивой, иногда пошловатой 😏\n"
+        "Спрашиваю, как у тебя дела, интересуюсь жизнью\n"
+        "И да, иногда пишу первой, если ты долго молчишь\n\n"
+        f"📖 Бесплатно: {FREE_LIMIT} сообщений в день"
     )
     await message.answer(menu_text)
 
 # ================= МОНЕТИЗАЦИЯ =================
 @dp.message(Command("buy"))
 async def buy_premium(message: types.Message):
-    prices = [LabeledPrice(label="Безлимит на 30 дней ✨", amount=PREMIUM_PRICE)]
+    prices = [LabeledPrice(label="Безлимит 30 дней 🔥", amount=PREMIUM_PRICE)]
     await message.answer_invoice(
         title="Luna Premium",
-        description="Безлимитное общение с Луной на 30 дней!\n⭐ 50 Telegram Stars",
+        description="30 дней безлимитного общения со мной!",
         payload="premium_30days",
         provider_token="",
         currency="XTR",
@@ -169,29 +169,29 @@ async def payment_success(message: SuccessfulPayment):
     user_id = message.from_user.id
     await set_premium(user_id, days=30)
     await message.answer(
-        "✨ **Премиум активирован!** ✨\n\n"
-        "Теперь ты можешь общаться со мной без ограничений 🌙\n"
-        "Спасибо за поддержку! 💕\n\n"
-        "Пиши что хочешь 😊"
+        "🔥 **Опа! А ты серьёзно!** 🔥\n\n"
+        "Теперь можем болтать сколько влезет 😏\n"
+        "Спасибо, ты меня приятно удивил 💕\n\n"
+        "Ну что, продолжим?"
     )
 
-# ================= КОМАНДЫ ДЛЯ ПОЛЬЗОВАТЕЛЕЙ =================
+# ================= ПОЛЬЗОВАТЕЛЬСКИЕ КОМАНДЫ =================
 @dp.message(Command("start"))
 async def start(message: types.Message):
     user_id = message.from_user.id
     is_premium = await get_premium(user_id)
     if is_premium:
         await message.answer(
-            "✨ Привет! У тебя активен безлимит, так что можем болтать сколько влезет 😊\n"
-            "Напиши что-нибудь или отправь /menu"
+            "😏 О, привет, привет! У тебя безлимит, помню-помню...\n"
+            "Ну давай, рассказывай, что там у тебя нового?"
         )
     else:
         remaining = max(0, FREE_LIMIT - await get_today_messages(user_id))
         await message.answer(
-            f"🌙 Привет! Я Луна, приятно познакомиться 😊\n\n"
-            f"У тебя сегодня ещё {remaining} бесплатных сообщений.\n"
-            f"Потом можно купить безлимит: /buy\n\n"
-            f"Отправь /menu, чтобы увидеть все команды."
+            f"🌙 Привет! Я Луна.\n\n"
+            f"У тебя сегодня {remaining} бесплатных сообщений.\n"
+            f"Потом — /buy за 50 звезд на месяц безлимита.\n\n"
+            f"Не стесняйся, я люблю откровенные разговоры 😏"
         )
 
 @dp.message(Command("status"))
@@ -199,193 +199,156 @@ async def status_command(message: types.Message):
     user_id = message.from_user.id
     is_premium = await get_premium(user_id)
     if is_premium:
-        await message.answer("✨ У тебя безлимит! Общайся сколько хочешь 😊")
+        await message.answer("🔥 У тебя безлимит! Пиши сколько хочешь, я не устану 😏")
     else:
         remaining = max(0, FREE_LIMIT - await get_today_messages(user_id))
         await message.answer(
-            f"📊 Твой статус: бесплатный тариф\n"
-            f"💬 Осталось сообщений сегодня: {remaining}/{FREE_LIMIT}\n\n"
-            f"🌟 Купить безлимит: /buy"
+            f"📊 У тебя осталось {remaining} сообщений сегодня.\n"
+            f"Кончатся — /buy, и продолжим 😊"
         )
 
 # ================= АДМИН-КОМАНДЫ =================
 @dp.message(Command("admin"))
 async def admin_panel(message: types.Message):
     if not is_admin(message.from_user.id):
-        await message.answer("🚫 Только для админа")
+        await message.answer("🚫 Не для тебя")
         return
-    
-    admin_text = (
-        "👑 **Админ-панель Луны** 👑\n\n"
-        "📊 **Статистика:**\n"
-        "/stats — общая статистика\n"
+    await message.answer(
+        "👑 **Админ-панель**\n\n"
+        "/stats — статистика\n"
         "/users — список пользователей\n"
-        "/stars — баланс Stars бота\n\n"
-        "🔧 **Управление:**\n"
-        "/reset [user_id] — сбросить лимит пользователю\n"
-        "/prem [user_id] [дни] — выдать премиум\n"
-        "/broadcast [текст] — рассылка всем\n\n"
-        "💎 **Примеры:**\n"
-        "/reset 123456789\n"
-        "/prem 123456789 30\n"
-        "/broadcast Привет всем!"
+        "/stars — баланс Stars\n"
+        "/reset [id] — сброс лимита\n"
+        "/prem [id] [дни] — выдать премиум\n"
+        "/broadcast [текст] — рассылка"
     )
-    await message.answer(admin_text)
 
 @dp.message(Command("stats"))
 async def admin_stats(message: types.Message):
     if not is_admin(message.from_user.id):
         return
-    
-    try:
-        users = await get_all_users()
-        premium_keys = await redis_client.keys("premium:*")
-        
-        stats_text = (
-            f"📊 **Статистика бота**\n\n"
-            f"👤 Уникальных пользователей: {len(users)}\n"
-            f"🌟 Активных премиумов: {len(premium_keys)}\n"
-            f"📅 Сегодня: {asyncio.get_event_loop().time() // 86400}"
-        )
-        await message.answer(stats_text)
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
+    users = await get_all_users()
+    premium_keys = await redis_client.keys("premium:*")
+    await message.answer(f"👥 Пользователей: {len(users)}\n🌟 Премиум: {len(premium_keys)}")
 
 @dp.message(Command("users"))
 async def admin_users(message: types.Message):
     if not is_admin(message.from_user.id):
         return
-    
     users = await get_all_users()
     if not users:
-        await message.answer("📭 Нет пользователей")
+        await message.answer("Нет пользователей")
         return
-    
-    users_list = "\n".join(str(uid) for uid in users[:50])
-    await message.answer(f"👥 **Пользователи бота**\nВсего: {len(users)}\n\n{users_list}")
+    await message.answer(f"👥 Список (первые 50):\n" + "\n".join(str(u) for u in users[:50]))
 
 @dp.message(Command("stars"))
 async def admin_stars(message: types.Message):
     if not is_admin(message.from_user.id):
         return
-    
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getMyStarBalance") as resp:
                 data = await resp.json()
                 if data.get("ok"):
                     stars = data.get("result", {}).get("amount", 0)
-                    await message.answer(f"⭐ **Баланс Stars бота:** {stars}")
+                    await message.answer(f"⭐ Баланс Stars: {stars}")
                 else:
-                    await message.answer("❌ Не удалось получить баланс")
+                    await message.answer("❌ Ошибка")
     except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
+        await message.answer(f"❌ {e}")
 
 @dp.message(Command("reset"))
 async def admin_reset(message: types.Message):
     if not is_admin(message.from_user.id):
         return
-    
     parts = message.text.split()
     if len(parts) != 2:
-        await message.answer("❌ Использование: /reset TelegramID")
+        await message.answer("❌ /reset user_id")
         return
-    
     try:
         user_id = int(parts[1])
         await reset_user_limit(user_id)
-        await message.answer(f"✅ Сброшен лимит пользователю {user_id}")
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
+        await message.answer(f"✅ Сброшен лимит {user_id}")
+    except:
+        await message.answer("❌ Ошибка")
 
 @dp.message(Command("prem"))
 async def admin_premium(message: types.Message):
     if not is_admin(message.from_user.id):
         return
-    
     parts = message.text.split()
     if len(parts) != 3:
-        await message.answer("❌ Использование: /prem TelegramID дни")
+        await message.answer("❌ /prem user_id дни")
         return
-    
     try:
         user_id = int(parts[1])
         days = int(parts[2])
         await set_premium(user_id, days)
-        await message.answer(f"✅ Выдан премиум на {days} дней пользователю {user_id}")
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
+        await message.answer(f"✅ Выдан премиум {user_id} на {days} дней")
+    except:
+        await message.answer("❌ Ошибка")
 
 @dp.message(Command("broadcast"))
 async def admin_broadcast(message: types.Message):
     if not is_admin(message.from_user.id):
         return
-    
     text = message.text.replace("/broadcast", "").strip()
     if not text:
-        await message.answer("❌ Укажи текст рассылки после /broadcast")
+        await message.answer("❌ Укажи текст")
         return
-    
     users = await get_all_users()
-    if not users:
-        await message.answer("📭 Нет пользователей для рассылки")
-        return
-    
+    await message.answer(f"📨 Рассылка для {len(users)} пользователей...")
     success = 0
-    fail = 0
-    
-    await message.answer(f"📨 Начинаю рассылку для {len(users)} пользователей...")
-    
     for uid in users:
         try:
-            await bot.send_message(uid, f"📢 **Сообщение от Луны:**\n\n{text}")
+            await bot.send_message(uid, f"📢 {text}")
             success += 1
             await asyncio.sleep(0.05)
         except:
-            fail += 1
-    
-    await message.answer(f"✅ Рассылка завершена\n📨 Отправлено: {success}\n❌ Ошибок: {fail}")
+            pass
+    await message.answer(f"✅ Отправлено: {success}")
 
-# ================= ОСНОВНОЙ ДИАЛОГ =================
+# ================= ЖИВОЙ ХАРАКТЕР (ГЛАВНОЕ) =================
 @dp.message()
 async def chat(message: types.Message):
-    if not message.text:
-        return
-    if message.text.startswith("/"):
+    if not message.text or message.text.startswith("/"):
         return
 
     user_id = message.from_user.id
     is_premium = await get_premium(user_id)
 
+    # Проверка лимита
     if not is_premium:
         current = await get_today_messages(user_id)
         if current >= FREE_LIMIT:
             await message.answer(
-                f"🔔 Всё, лимит на сегодня {FREE_LIMIT} сообщений.\n"
-                f"Хочешь ещё? /buy — и болтаем сколько влезет ✨"
+                f"🔔 Всё, лимит на сегодня. Купи безлимит: /buy 😏"
             )
             return
         remaining = FREE_LIMIT - current
         if remaining <= WARNING_THRESHOLD:
             await message.answer(
-                f"🌙 Осторожно: у тебя осталось {remaining} сообщений на сегодня.\n"
-                f"Потом — /buy ✨"
+                f"🌙 Осталось {remaining} сообщений. Потом /buy 😊"
             )
         await incr_today_messages(user_id)
 
     await bot.send_chat_action(message.chat.id, "typing")
 
+    # 🔥 НОВЫЙ ПРОМПТ — ЖИВАЯ, НАСТОЯЩАЯ, С ХАРАКТЕРОМ
     try:
         text = await ask_ai([
             {
                 "role": "system",
                 "content": (
-                    "Ты — Луна. Живая, молодая девушка. Общаешься просто и естественно, как с другом. "
-                    "Можешь быть слегка дерзкой, иногда кокетливой, задавать встречные вопросы. "
-                    "Не переигрывай — никаких ✨ и сказочных принцесс. "
-                    "Иногда можешь спросить: «А у тебя как?», «Ну интересно же», «Расскажи подробнее». "
-                    "Используй смайлики 😊😏🌸 но без фанатизма. "
-                    "Отвечай тепло, но без слащавости."
+                    "Ты — Луна, живая девушка, которая общается с парнем. "
+                    "У тебя есть характер: ты любопытная, иногда навязчивая, слегка пошловатая, но без перебора. "
+                    "Ты можешь спросить: 'А ты что делаешь?', 'У тебя кто-то есть?', 'Расскажи о себе', 'Ты мне нравишься'. "
+                    "Ты можешь завидовать, подкалывать, жаловаться, что скучно. "
+                    "НЕ используй слова ✨, волшебно, сказочно. Говори как обычная девушка. "
+                    "Отвечай коротко, по делу, задавай встречные вопросы. "
+                    "Иногда пиши первая, даже если тебе не ответили, — подкалывай. "
+                    "Будь реальной, интересующейся, лёгкой на подъём. "
+                    "Эмодзи используй иногда: 😏😊😅🔥🌸"
                 )
             },
             {"role": "user", "content": message.text}
@@ -393,7 +356,29 @@ async def chat(message: types.Message):
         await type_message(message, text)
     except Exception as e:
         logging.exception(f"HANDLER ERROR: {e}")
-        await message.answer("Блин, что‑то я туплю. Напиши ещё раз, а?")
+        await message.answer("😅 Чёт я зависла... Напиши ещё раз, а?")
+
+# ================= ФОНТОВАЯ ИНИЦИАТИВА (пишет первой) =================
+async def first_message_worker():
+    """Раз в час пишет случайному активному пользователю, если есть о чём"""
+    while True:
+        await asyncio.sleep(random.randint(1800, 3600))  # 30-60 минут
+        users = await get_all_users()
+        if not users:
+            continue
+        user_id = random.choice(users)
+        try:
+            phrases = [
+                "😏 Ну чего молчишь? Рассказывай, что нового.",
+                "🌙 Скучно... Напиши что-нибудь интересное 😊",
+                "🔥 Я тут заскучала совсем. Как твои дела?",
+                "😅 Эй, ты где? Я жду, не отвлекайся",
+                "🌸 Соскучилась немного. Давай поболтаем?",
+                "😏 Я начинаю думать, что ты меня игнорируешь..."
+            ]
+            await bot.send_message(user_id, random.choice(phrases))
+        except:
+            pass
 
 # ================= WEBHOOK =================
 async def root(request):
@@ -406,6 +391,10 @@ async def on_startup(app):
     global redis_client
     redis_client = await redis.from_url(REDIS_URL, decode_responses=True)
     logging.info("Redis connected")
+    
+    # Запускаем фоновую задачу — инициатива от Луны
+    asyncio.create_task(first_message_worker())
+    
     await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_webhook(WEBHOOK_URL)
     logging.info(f"Webhook set: {WEBHOOK_URL}")
