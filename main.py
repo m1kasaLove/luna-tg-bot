@@ -13,7 +13,7 @@ from openai import AsyncOpenAI
 # ===== ENV =====
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 # ⚠️ ВРЕМЕННО ключ в коде. ПОТОМ ПЕРЕНЕСТИ В ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ!
-POLZA_API_KEY = "pza_FiV3Pscoe4xKEor8l42rfOnNQ5baXMwM"
+POLZA_API_KEY = os.getenv("POLZA_API_KEY")
 
 if not TELEGRAM_TOKEN:
     raise RuntimeError("❌ Не задан TELEGRAM_TOKEN")
