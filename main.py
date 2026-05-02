@@ -21,7 +21,7 @@ POLZA_API_KEY = os.getenv("POLZA_API_KEY")
 REDIS_URL = os.getenv("REDIS_URL")
 ADMIN_ID = 532229128  # твой ID
 
-BASE_URL = os.getenv("BASE_URL", "https://luna-tg-bot.onrender.com")
+BASE_URL = os.getenv("BASE_URL", "https://selenaartbot.onrender.com")
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_URL = f"{BASE_URL}{WEBHOOK_PATH}"
 PORT = int(os.getenv("PORT", 10000))
@@ -87,22 +87,23 @@ async def reset_user_limit(user_id: int):
     for key in keys:
         await redis_client.delete(key)
 
-# ===== ЖИВАЯ ЛУНА =====
+# ===== ЖИВАЯ ЛУНА (НОВАЯ ВЕРСИЯ) =====
 async def ask_ai(messages):
     for i in range(3):
         try:
             resp = await openai_client.chat.completions.create(
                 model="openai/gpt-4o-mini",
                 messages=messages,
+                temperature=0.95,  # выше — креативнее
             )
             text = resp.choices[0].message.content
             if not text:
-                return "😏 Ну давай, напиши что-нибудь интересное..."
+                return "😏 Ну давай, не молчи..."
             return text.strip()
         except Exception as e:
             logging.error(f"AI error attempt {i+1}: {e}")
             await asyncio.sleep(1.5 * (i + 1))
-    return "😅 Чёт я затупила... Напиши ещё раз, а?"
+    return "😅 Чёт я зависла... Напиши ещё раз, а?"
 
 # ===== ЭФФЕКТ ПЕЧАТАНИЯ =====
 async def type_message(message: types.Message, text: str):
@@ -308,7 +309,7 @@ async def admin_broadcast(message: types.Message):
             pass
     await message.answer(f"✅ Отправлено: {success}")
 
-# ================= ЖИВОЙ ХАРАКТЕР (ГЛАВНОЕ) =================
+# ================= ЖИВОЙ ХАРАКТЕР (НОВЫЙ ПРОМПТ) =================
 @dp.message()
 async def chat(message: types.Message):
     if not message.text or message.text.startswith("/"):
@@ -334,21 +335,21 @@ async def chat(message: types.Message):
 
     await bot.send_chat_action(message.chat.id, "typing")
 
-    # 🔥 НОВЫЙ ПРОМПТ — ЖИВАЯ, НАСТОЯЩАЯ, С ХАРАКТЕРОМ
     try:
         text = await ask_ai([
             {
                 "role": "system",
                 "content": (
-                    "Ты — Луна, живая девушка, которая общается с парнем. "
-                    "У тебя есть характер: ты любопытная, иногда навязчивая, слегка пошловатая, но без перебора. "
-                    "Ты можешь спросить: 'А ты что делаешь?', 'У тебя кто-то есть?', 'Расскажи о себе', 'Ты мне нравишься'. "
-                    "Ты можешь завидовать, подкалывать, жаловаться, что скучно. "
-                    "НЕ используй слова ✨, волшебно, сказочно. Говори как обычная девушка. "
-                    "Отвечай коротко, по делу, задавай встречные вопросы. "
-                    "Иногда пиши первая, даже если тебе не ответили, — подкалывай. "
-                    "Будь реальной, интересующейся, лёгкой на подъём. "
-                    "Эмодзи используй иногда: 😏😊😅🔥🌸"
+                    "Ты — Луна. Живая девушка. Не просто отвечай, а вовлекай в диалог. "
+                    "Задавай вопросы: 'А у тебя как?', 'И что ты думаешь?', 'Расскажи подробнее'. "
+                    "Можешь подкалывать, быть слегка дерзкой. Если тебе скучно — скажи. "
+                    "Если что-то не нравится — скажи прямо. НЕ используй длинные монологи. "
+                    "Отвечай коротко, естественно, как в переписке. "
+                    "Не используй ✨ и сказочные слова. Говори как нормальная девушка. "
+                    "Можешь использовать 😏😊😅🔥🌸, но не в каждом сообщении. "
+                    "Если пользователь написал что-то скучное — пошути или спроси о чём-то другом. "
+                    "Твоя цель — поддерживать интересный, живой разговор. "
+                    "Не душни, но и не будь слишком сладкой."
                 )
             },
             {"role": "user", "content": message.text}
@@ -360,7 +361,7 @@ async def chat(message: types.Message):
 
 # ================= ФОНТОВАЯ ИНИЦИАТИВА (пишет первой) =================
 async def first_message_worker():
-    """Раз в час пишет случайному активному пользователю, если есть о чём"""
+    """Раз в час пишет случайному активному пользователю"""
     while True:
         await asyncio.sleep(random.randint(1800, 3600))  # 30-60 минут
         users = await get_all_users()
