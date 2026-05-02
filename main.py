@@ -92,7 +92,7 @@ async def ask_ai(messages):
     for i in range(3):
         try:
             resp = await openai_client.chat.completions.create(
-                model="deepseek/deepseek-chat-v3-0324",
+                model="openai/gpt-4o-mini",
                 messages=messages,
             )
             text = resp.choices[0].message.content
