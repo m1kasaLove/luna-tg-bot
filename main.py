@@ -3,12 +3,13 @@ import logging
 import os
 import aiohttp
 import random
+import string
 from datetime import datetime
 
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import LabeledPrice, PreCheckoutQuery, SuccessfulPayment
+from aiogram.types import LabeledPrice, PreCheckoutQuery, SuccessfulPayment, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 from openai import AsyncOpenAI
@@ -19,12 +20,12 @@ import redis.asyncio as redis
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 POLZA_API_KEY = os.getenv("POLZA_API_KEY")
 REDIS_URL = os.getenv("REDIS_URL")
-ADMIN_ID = 532229128  # твой ID
+ADMIN_ID = 532229128
 
 BASE_URL = os.getenv("BASE_URL", "https://selenaartbot.onrender.com")
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_URL = f"{BASE_URL}{WEBHOOK_PATH}"
-PORT = int(os.getenv("PORT", 10000))
+PORT = int(os.getenv("PORT", 10000"))
 
 logging.basicConfig(level=logging.INFO)
 
@@ -38,6 +39,10 @@ FREE_LIMIT = 30
 PREMIUM_PRICE = 50
 WARNING_THRESHOLD = 5
 
+# Реферальная система
+REFERRAL_REWARD = 3  # бесплатных сообщений за приглашённого друга
+BOT_USERNAME = "LunaIsLovelyLunaBot"
+
 # ===== AI CLIENT =====
 openai_client = AsyncOpenAI(
     base_url="https://api.polza.ai/v1",
@@ -49,7 +54,7 @@ openai_client = AsyncOpenAI(
 def is_admin(user_id: int) -> bool:
     return user_id == ADMIN_ID
 
-# ===== REDIS =====
+# ===== REDIS ОСНОВНЫЕ =====
 async def get_premium(user_id: int) -> bool:
     try:
         status = await redis_client.get(f"premium:{user_id}")
@@ -87,14 +92,60 @@ async def reset_user_limit(user_id: int):
     for key in keys:
         await redis_client.delete(key)
 
-# ===== ЖИВАЯ ЛУНА (НОВАЯ ВЕРСИЯ) =====
+# ===== РЕФЕРАЛЬНАЯ СИСТЕМА =====
+async def get_referral_code(user_id: int) -> str:
+    code = await redis_client.get(f"ref:code:{user_id}")
+    if not code:
+        code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+        await redis_client.setex(f"ref:code:{user_id}", 86400 * 365, code)
+    return code
+
+async def get_referred_by(user_id: int) -> int:
+    referrer = await redis_client.get(f"ref:by:{user_id}")
+    return int(referrer) if referrer else None
+
+async def set_referred_by(user_id: int, referrer_id: int):
+    await redis_client.set(f"ref:by:{user_id}", referrer_id)
+
+async def get_referral_count(user_id: int) -> int:
+    val = await redis_client.get(f"ref:count:{user_id}")
+    return int(val) if val else 0
+
+async def increment_referral_count(user_id: int):
+    await redis_client.incr(f"ref:count:{user_id}")
+
+# ===== РЕКЛАМА SELENEARTBOT =====
+async def send_selene_ad(message: types.Message):
+    await message.answer(
+        "🎨 *Хочешь создавать уникальные картинки?*\n\n"
+        "Попробуй моего другого бота — **SeleneArtBot**!\n"
+        "👉 @SeleneArtBot\n\n"
+        "Генерация и редактирование фото через ИИ! ✨",
+        parse_mode="Markdown",
+        disable_web_page_preview=True
+    )
+
+# ===== НАСТРОЙКА МЕНЮ КОМАНД =====
+async def set_commands():
+    commands = [
+        BotCommand(command="start", description="🌙 Начать общение"),
+        BotCommand(command="menu", description="📋 Показать меню"),
+        BotCommand(command="status", description="📊 Мой статус"),
+        BotCommand(command="buy", description="⭐ Купить безлимит"),
+        BotCommand(command="referral", description="🔥 Пригласить друга"),
+        BotCommand(command="selene", description="🎨 SeleneArtBot"),
+    ]
+    await bot.set_my_commands(commands)
+    logging.info("Menu commands set successfully")
+
+# ===== ЖИВАЯ ЛУНА =====
 async def ask_ai(messages):
     for i in range(3):
         try:
             resp = await openai_client.chat.completions.create(
                 model="openai/gpt-4o-mini",
                 messages=messages,
-                temperature=0.95,  # выше — креативнее
+                temperature=0.95,
             )
             text = resp.choices[0].message.content
             if not text:
@@ -132,20 +183,65 @@ async def type_message(message: types.Message, text: str):
 @dp.message(Command("menu"))
 @dp.message(Command("help"))
 async def show_menu(message: types.Message):
+    user_id = message.from_user.id
+    ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{await get_referral_code(user_id)}"
+    ref_count = await get_referral_count(user_id)
+    
     menu_text = (
         "🌙 **Луна — твоя виртуальная подружка** 🌙\n\n"
         "📋 **Команды:**\n"
         "/start — начать общение\n"
         "/menu — это меню\n"
         "/status — сколько осталось сообщений\n"
-        "/buy — купить безлимит (50 Stars на 30 дней)\n\n"
-        "💬 **Обо мне:**\n"
-        "Я люблю поболтать, могу быть навязчивой, иногда пошловатой 😏\n"
-        "Спрашиваю, как у тебя дела, интересуюсь жизнью\n"
-        "И да, иногда пишу первой, если ты долго молчишь\n\n"
+        "/buy — купить безлимит (50 Stars на 30 дней)\n"
+        "/referral — пригласить друга (+3 сообщения)\n"
+        "/selene — перейти в SeleneArtBot\n\n"
+        f"👥 **Приглашено друзей:** {ref_count}\n"
+        f"🔥 За каждого друга +{REFERRAL_REWARD} сообщений!\n\n"
         f"📖 Бесплатно: {FREE_LIMIT} сообщений в день"
     )
-    await message.answer(menu_text)
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔥 Пригласить друга", url=ref_link)],
+        [InlineKeyboardButton(text="🎨 SeleneArtBot", callback_data="goto_selene")]
+    ])
+    
+    await message.answer(menu_text, parse_mode="Markdown", reply_markup=keyboard)
+    
+    # Реклама SeleneArtBot раз в 5 вызовов меню
+    if random.random() < 0.2:
+        await send_selene_ad(message)
+
+# ================= РЕФЕРАЛЬНАЯ КОМАНДА =================
+@dp.message(Command("referral"))
+async def cmd_referral(message: types.Message):
+    user_id = message.from_user.id
+    ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{await get_referral_code(user_id)}"
+    count = await get_referral_count(user_id)
+    
+    await message.answer(
+        f"🔥 *Реферальная программа*\n\n"
+        f"Приглашай друзей и получай бонусы!\n"
+        f"За каждого друга — +{REFERRAL_REWARD} сообщений\n\n"
+        f"👥 Приглашено: {count}\n"
+        f"🎁 Бонусов получено: {count * REFERRAL_REWARD}\n\n"
+        f"👇 Поделись ссылкой:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📤 Поделиться ссылкой", url=f"https://t.me/share/url?url={ref_link}&text=Привет! Нашёл отличного бота для общения — Луна! 😊🌙")],
+            [InlineKeyboardButton(text="🎨 SeleneArtBot", url="https://t.me/SeleneArtBot")]
+        ])
+    )
+
+# ================= КОМАНДА ПЕРЕХОДА В SELENEARTBOT =================
+@dp.message(Command("selene"))
+async def cmd_selene(message: types.Message):
+    await send_selene_ad(message)
+
+@dp.callback_query(lambda c: c.data == "goto_selene")
+async def goto_selene(callback: types.CallbackQuery):
+    await send_selene_ad(callback.message)
+    await callback.answer()
 
 # ================= МОНЕТИЗАЦИЯ =================
 @dp.message(Command("buy"))
@@ -181,10 +277,33 @@ async def payment_success(message: SuccessfulPayment):
 async def start(message: types.Message):
     user_id = message.from_user.id
     is_premium = await get_premium(user_id)
+    
+    # Проверка реферальной ссылки
+    args = message.text.split()
+    if len(args) > 1 and args[1].startswith("ref_"):
+        referrer_code = args[1].replace("ref_", "")
+        keys = await redis_client.keys("ref:code:*")
+        for key in keys:
+            code = await redis_client.get(key)
+            if code == referrer_code:
+                referrer_id = int(key.split(":")[-1])
+                if referrer_id != user_id and not await get_referred_by(user_id):
+                    await set_referred_by(user_id, referrer_id)
+                    await increment_referral_count(referrer_id)
+                    # Начисляем бонус новому пользователю
+                    await incr_today_messages(user_id)  # это нужно переделать под бонус
+                    try:
+                        await bot.send_message(referrer_id, f"🎉 По вашей ссылке пришёл новый пользователь! Вы получили +{REFERRAL_REWARD} сообщений в день!", parse_mode="Markdown")
+                    except:
+                        pass
+                    await message.answer(f"🎉 Вы получили +{REFERRAL_REWARD} сообщений за регистрацию по ссылке!", parse_mode="Markdown")
+                break
+    
     if is_premium:
         await message.answer(
             "😏 О, привет, привет! У тебя безлимит, помню-помню...\n"
-            "Ну давай, рассказывай, что там у тебя нового?"
+            "Ну давай, рассказывай, что там у тебя нового?\n\n"
+            "🎨 А ещё у меня есть подружка — @SeleneArtBot, она умеет рисовать!"
         )
     else:
         remaining = max(0, FREE_LIMIT - await get_today_messages(user_id))
@@ -192,20 +311,33 @@ async def start(message: types.Message):
             f"🌙 Привет! Я Луна.\n\n"
             f"У тебя сегодня {remaining} бесплатных сообщений.\n"
             f"Потом — /buy за 50 звезд на месяц безлимита.\n\n"
-            f"Не стесняйся, я люблю откровенные разговоры 😏"
+            f"Не стесняйся, я люблю откровенные разговоры 😏\n\n"
+            f"🎨 @SeleneArtBot — мой друг, он рисует картинки!"
         )
+    
+    await asyncio.sleep(3)
+    await send_selene_ad(message)
 
 @dp.message(Command("status"))
 async def status_command(message: types.Message):
     user_id = message.from_user.id
     is_premium = await get_premium(user_id)
+    ref_count = await get_referral_count(user_id)
+    
     if is_premium:
-        await message.answer("🔥 У тебя безлимит! Пиши сколько хочешь, я не устану 😏")
+        await message.answer(
+            f"🔥 У тебя безлимит! Пиши сколько хочешь, я не устану 😏\n"
+            f"👥 Приглашено друзей: {ref_count}\n"
+            f"🎨 @SeleneArtBot — рисует картинки!"
+        )
     else:
         remaining = max(0, FREE_LIMIT - await get_today_messages(user_id))
         await message.answer(
             f"📊 У тебя осталось {remaining} сообщений сегодня.\n"
-            f"Кончатся — /buy, и продолжим 😊"
+            f"👥 Приглашено друзей: {ref_count}\n"
+            f"🔥 За каждого друга +{REFERRAL_REWARD} сообщений!\n"
+            f"Кончатся лимиты — /buy или приглашай друзей 😊\n\n"
+            f"🎨 @SeleneArtBot"
         )
 
 # ================= АДМИН-КОМАНДЫ =================
@@ -230,7 +362,8 @@ async def admin_stats(message: types.Message):
         return
     users = await get_all_users()
     premium_keys = await redis_client.keys("premium:*")
-    await message.answer(f"👥 Пользователей: {len(users)}\n🌟 Премиум: {len(premium_keys)}")
+    ref_keys = await redis_client.keys("ref:count:*")
+    await message.answer(f"👥 Пользователей: {len(users)}\n🌟 Премиум: {len(premium_keys)}\n🔥 Рефералов: {len(ref_keys)}")
 
 @dp.message(Command("users"))
 async def admin_users(message: types.Message):
@@ -309,7 +442,7 @@ async def admin_broadcast(message: types.Message):
             pass
     await message.answer(f"✅ Отправлено: {success}")
 
-# ================= ЖИВОЙ ХАРАКТЕР (НОВЫЙ ПРОМПТ) =================
+# ================= ОСНОВНОЙ ДИАЛОГ =================
 @dp.message()
 async def chat(message: types.Message):
     if not message.text or message.text.startswith("/"):
@@ -321,15 +454,20 @@ async def chat(message: types.Message):
     # Проверка лимита
     if not is_premium:
         current = await get_today_messages(user_id)
-        if current >= FREE_LIMIT:
+        
+        # Проверяем, есть ли бонусные сообщения от рефералов
+        ref_count = await get_referral_count(user_id)
+        bonus_limit = FREE_LIMIT + (ref_count * REFERRAL_REWARD)
+        
+        if current >= bonus_limit:
             await message.answer(
-                f"🔔 Всё, лимит на сегодня. Купи безлимит: /buy 😏"
+                f"🔔 Всё, лимит на сегодня. Купи безлимит: /buy или пригласи друга: /referral 😏"
             )
             return
-        remaining = FREE_LIMIT - current
+        remaining = bonus_limit - current
         if remaining <= WARNING_THRESHOLD:
             await message.answer(
-                f"🌙 Осталось {remaining} сообщений. Потом /buy 😊"
+                f"🌙 Осталось {remaining} сообщений. Потом /buy или пригласи друга /referral 😊"
             )
         await incr_today_messages(user_id)
 
@@ -349,7 +487,8 @@ async def chat(message: types.Message):
                     "Можешь использовать 😏😊😅🔥🌸, но не в каждом сообщении. "
                     "Если пользователь написал что-то скучное — пошути или спроси о чём-то другом. "
                     "Твоя цель — поддерживать интересный, живой разговор. "
-                    "Не душни, но и не будь слишком сладкой."
+                    "Не душни, но и не будь слишком сладкой. "
+                    "Иногда напоминай о @SeleneArtBot — он рисует картинки."
                 )
             },
             {"role": "user", "content": message.text}
@@ -359,11 +498,10 @@ async def chat(message: types.Message):
         logging.exception(f"HANDLER ERROR: {e}")
         await message.answer("😅 Чёт я зависла... Напиши ещё раз, а?")
 
-# ================= ФОНТОВАЯ ИНИЦИАТИВА (пишет первой) =================
+# ================= ИНИЦИАТИВА ОТ ЛУНЫ =================
 async def first_message_worker():
-    """Раз в час пишет случайному активному пользователю"""
     while True:
-        await asyncio.sleep(random.randint(1800, 3600))  # 30-60 минут
+        await asyncio.sleep(random.randint(1800, 3600))
         users = await get_all_users()
         if not users:
             continue
@@ -375,7 +513,8 @@ async def first_message_worker():
                 "🔥 Я тут заскучала совсем. Как твои дела?",
                 "😅 Эй, ты где? Я жду, не отвлекайся",
                 "🌸 Соскучилась немного. Давай поболтаем?",
-                "😏 Я начинаю думать, что ты меня игнорируешь..."
+                "😏 Я начинаю думать, что ты меня игнорируешь...",
+                "🎨 Кстати, @SeleneArtBot рисует классные картинки, попробуй!"
             ]
             await bot.send_message(user_id, random.choice(phrases))
         except:
@@ -393,7 +532,7 @@ async def on_startup(app):
     redis_client = await redis.from_url(REDIS_URL, decode_responses=True)
     logging.info("Redis connected")
     
-    # Запускаем фоновую задачу — инициатива от Луны
+    await set_commands()
     asyncio.create_task(first_message_worker())
     
     await bot.delete_webhook(drop_pending_updates=True)
